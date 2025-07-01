@@ -1,0 +1,50 @@
+# Cursor Rules for Nostr Dialog Monorepo
+
+## Project Context
+This is a Rust monorepo building Nostr protocol applications with:
+- NIP-42 authentication (AUTH command)
+- Negentropy sync protocol
+- Whitenoise DM protocol (NOT NIP-04/NIP-17)
+
+## Code Style
+- Use idiomatic Rust patterns
+- Prefer `?` operator for error propagation
+- Use `#[derive()]` for common traits
+- Keep functions small and focused
+- Use descriptive variable names
+
+## Architecture Guidelines
+- dialog_client is the core library - keep it platform agnostic
+- dialog_relay uses rust-nostr's relay builder patterns
+- dialog_cli is for testing - can be more relaxed with error handling
+- dialog_deploy will handle infrastructure - design for async operations
+
+## Nostr Protocol Specifics
+- Always use NIP-42 for relay authentication
+- Use Whitenoise for DMs, never NIP-04
+- Implement Negentropy for efficient sync
+- Follow Nostr protocol conventions strictly
+
+## Testing
+- Write unit tests for protocol implementations
+- Use dialog_cli for integration testing
+- Test error cases thoroughly
+- Mock external dependencies
+
+## Security
+- Never log private keys
+- Validate all cryptographic operations
+- Use constant-time comparisons for secrets
+- Sanitize all user inputs
+
+## Dependencies
+- Prefer workspace dependencies
+- Use rust-nostr crates where applicable
+- Minimize external dependencies
+- Pin versions for stability
+
+## Documentation
+- Document all public APIs
+- Include usage examples
+- Explain protocol implementations
+- Keep README files updated

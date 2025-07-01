@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = [
+    "dialog_client",
+    "dialog_relay",
+    "dialog_cli",
+    "dialog_deploy",
+]
+
+[workspace.dependencies]
+# Common dependencies can be defined here

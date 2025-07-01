@@ -1,0 +1,75 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# Debug
+*.dSYM/
+*.pdb
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# iOS
+ios/.build/
+ios/DerivedData/
+ios/*.xcodeproj/xcuserdata/
+ios/*.xcworkspace/xcuserdata/
+ios/*.xcodeproj/project.xcworkspace/xcuserdata/
+ios/*.xcworkspace/xcshareddata/IDEWorkspaceChecks.plist
+ios/Pods/
+ios/Podfile.lock
+
+# Build artifacts
+*.ipa
+*.app
+*.dSYM.zip
+*.xcarchive
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Testing
+coverage/
+.nyc_output/
+
+# Misc
+.cache/
+dist/
+build/
+out/
+
+# Private keys and secrets
+*.pem
+*.key
+*.cert
+secrets/
+keys/
+
+# Backup files
+*.bak
+*.backup
+*.old
+
+# Temporary files
+*.tmp
+*.temp
+.tmp/
+.temp/
