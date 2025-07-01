@@ -6,6 +6,4 @@ members = [
     "dialog_cli",
     "dialog_deploy",
 ]
-
-[workspace.dependencies]
 # Common dependencies can be defined here

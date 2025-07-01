@@ -4,7 +4,7 @@
 This is a Rust monorepo building Nostr protocol applications with:
 - NIP-42 authentication (AUTH command)
 - Negentropy sync protocol
-- Whitenoise DM protocol (NOT NIP-04/NIP-17)
+- MLS-based DM protocol (NOT NIP-04/NIP-17)
 
 ## Code Style
 - Use idiomatic Rust patterns
@@ -21,7 +21,7 @@ This is a Rust monorepo building Nostr protocol applications with:
 
 ## Nostr Protocol Specifics
 - Always use NIP-42 for relay authentication
-- Use Whitenoise for DMs, never NIP-04
+- Use MLS-based protocol for DMs, never NIP-04
 - Implement Negentropy for efficient sync
 - Follow Nostr protocol conventions strictly
 

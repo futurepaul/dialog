@@ -4,3 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow = "1.0.98"
+clap = { version = "4.5.40", features = ["derive"] }
+dialog_client = { version = "0.1.0", path = "../dialog_client" }
+nostr-sdk = "0.42.0"
+tokio = "1.45.1"
+tracing = "0.1.41"
+tracing-subscriber = "0.3.19"
