@@ -1,7 +1,8 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use dialog_client::DialogClient;
-use nostr_sdk::prelude::*;
+use dialog_client::{DialogClient, PublicKey};
+// Note: Using whitenoise types now
+// use nostr_sdk::prelude::*;
 use tracing::info;
 use tokio::time::{sleep, Duration};
 
@@ -143,7 +144,11 @@ async fn publish_note(relay_url: &str, message: &str, key: Option<&str>) -> Resu
     let client = create_client(key).await?;
     client.connect_to_relay(relay_url).await?;
     
-    info!("Client pubkey: {}", client.get_public_key());
+    if let Some(pubkey) = client.get_public_key() {
+        info!("Client pubkey: {}", pubkey);
+    } else {
+        info!("Client pubkey: Not available");
+    }
     
     // Wait a moment for connection to establish
     sleep(Duration::from_secs(1)).await;
@@ -210,7 +215,11 @@ async fn send_encrypted_message(relay_url: &str, recipient_hex: &str, message: &
     // Parse recipient public key
     let recipient_pubkey = PublicKey::from_hex(recipient_hex)?;
     
-    info!("Client pubkey: {}", client.get_public_key());
+    if let Some(pubkey) = client.get_public_key() {
+        info!("Client pubkey: {}", pubkey);
+    } else {
+        info!("Client pubkey: Not available");
+    }
     info!("Recipient pubkey: {}", recipient_pubkey);
     
     // Wait a moment for connection to establish
@@ -228,7 +237,11 @@ async fn fetch_encrypted_messages(relay_url: &str, limit: usize, key: Option<&st
     let client = create_client(key).await?;
     client.connect_to_relay(relay_url).await?;
     
-    info!("Client pubkey: {}", client.get_public_key());
+    if let Some(pubkey) = client.get_public_key() {
+        info!("Client pubkey: {}", pubkey);
+    } else {
+        info!("Client pubkey: Not available");
+    }
     
     // Wait a moment for connection to establish
     sleep(Duration::from_secs(1)).await;
@@ -271,11 +284,15 @@ async fn create_group(relay_url: &str, name: &str, members_str: &str, key: Optio
     // Parse member public keys
     let members: Result<Vec<PublicKey>, _> = members_str
         .split(',')
-        .map(|hex| PublicKey::from_hex(hex.trim()))
+        .map(|hex| PublicKey::parse(hex.trim()))
         .collect();
     let members = members?;
     
-    info!("Client pubkey: {}", client.get_public_key());
+    if let Some(pubkey) = client.get_public_key() {
+        info!("Client pubkey: {}", pubkey);
+    } else {
+        info!("Client pubkey: Not available");
+    }
     info!("Creating group '{}' with {} members", name, members.len());
     
     // Wait a moment for connection to establish
@@ -293,7 +310,11 @@ async fn send_group_message(relay_url: &str, group_id: &str, message: &str, key:
     let client = create_client(key).await?;
     client.connect_to_relay(relay_url).await?;
     
-    info!("Client pubkey: {}", client.get_public_key());
+    if let Some(pubkey) = client.get_public_key() {
+        info!("Client pubkey: {}", pubkey);
+    } else {
+        info!("Client pubkey: Not available");
+    }
     
     // Wait a moment for connection to establish
     sleep(Duration::from_secs(1)).await;
@@ -307,7 +328,15 @@ async fn send_group_message(relay_url: &str, group_id: &str, message: &str, key:
 
 async fn show_key(key: Option<&str>) -> Result<()> {
     let client = create_client(key).await?;
-    println!("🔑 Your public key: {}", client.get_public_key());
-    println!("🗝️  Your secret key: {}", client.get_secret_key_hex());
+    if let Some(pubkey) = client.get_public_key() {
+        println!("🔑 Your public key: {}", pubkey);
+    } else {
+        println!("🔑 Your public key: Not available");
+    }
+    match client.get_secret_key_hex().await {
+        Ok(Some(secret)) => println!("🗝️  Your secret key: {}", secret),
+        Ok(None) => println!("🗝️  Your secret key: Not available"),
+        Err(e) => println!("🗝️  Your secret key: Error: {}", e),
+    }
     Ok(())
 }

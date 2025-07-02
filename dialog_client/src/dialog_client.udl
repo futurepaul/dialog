@@ -1,0 +1,73 @@
+namespace dialog_client {
+};
+
+[Error]
+interface ClientError {
+    InvalidKey(string message);
+    ConnectionError(string message);
+    EncryptionError(string message);
+    Generic(string message);
+};
+
+dictionary NoteData {
+    string id;
+    string content;
+    string author;
+    u64 created_at;
+};
+
+dictionary EncryptedMessage {
+    string id;
+    string content;
+    string sender;
+    u64 created_at;
+};
+
+interface DialogClient {
+    [Throws=ClientError]
+    constructor();
+    
+    [Throws=ClientError, Name="new_with_key"]
+    constructor([ByRef] string key);
+    
+    string get_public_key();
+    
+    string get_secret_key_hex();
+    
+    [Throws=ClientError]
+    void connect_to_relay([ByRef] string relay_url);
+    
+    [Throws=ClientError]
+    string publish_note([ByRef] string content);
+    
+    [Throws=ClientError]
+    sequence<NoteData> get_notes(u32? limit);
+    
+    // TODO: Re-enable these when type compatibility is fixed
+    // [Throws=ClientError]
+    // string send_encrypted_message([ByRef] string recipient_pubkey, [ByRef] string content);
+    
+    [Throws=ClientError]
+    sequence<EncryptedMessage> get_encrypted_messages();
+    
+    // [Throws=ClientError]
+    // string decrypt_message([ByRef] string sender_pubkey, [ByRef] string encrypted_content);
+    
+    [Throws=ClientError]
+    string create_group([ByRef] string group_name, sequence<string> member_pubkeys);
+    
+    [Throws=ClientError]
+    string send_group_message([ByRef] string group_id, [ByRef] string content, sequence<string> member_pubkeys);
+    
+    [Throws=ClientError]
+    sequence<string> fetch_groups();
+    
+    [Throws=ClientError]
+    sequence<string> fetch_group_messages([ByRef] string group_id);
+    
+    [Throws=ClientError]
+    void add_members_to_group([ByRef] string group_id, sequence<string> new_member_pubkeys);
+    
+    [Throws=ClientError]
+    void remove_members_from_group([ByRef] string group_id, sequence<string> member_pubkeys_to_remove);
+};

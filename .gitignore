@@ -19,7 +19,7 @@ Cargo.lock
 .AppleDouble
 .LSOverride
 
-# iOS
+# iOS/Xcode
 ios/.build/
 ios/DerivedData/
 ios/*.xcodeproj/xcuserdata/
@@ -28,12 +28,38 @@ ios/*.xcodeproj/project.xcworkspace/xcuserdata/
 ios/*.xcworkspace/xcshareddata/IDEWorkspaceChecks.plist
 ios/Pods/
 ios/Podfile.lock
+**/xcuserdata/
+**/project.xcworkspace/xcuserdata/
+**/*.xcworkspace/xcuserdata/
+UserInterfaceState.xcuserstate
+xcschememanagement.plist
+
+# Swift Package Manager
+.swiftpm/
+*/.swiftpm/
+**/.swiftpm/
+
+# UniFFI generated files
+dialog_ios/Sources/DialogClient/dialog_client.swift
+dialog_ios/Sources/DialogClient/dialog_clientFFI.h
+dialog_ios/Sources/DialogClient/dialog_clientFFI.modulemap
+
+# XCFramework build artifacts
+*.xcframework/
+dialog_ios/DialogClientFFI.xcframework/
 
 # Build artifacts
 *.ipa
 *.app
 *.dSYM.zip
 *.xcarchive
+*.dylib
+*.a
+target/swift-bindings/
+target/universal/
+target/aarch64-apple-ios/
+target/aarch64-apple-ios-sim/
+target/x86_64-apple-ios/
 
 # Environment
 .env
@@ -45,6 +71,8 @@ ios/Podfile.lock
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+logs/
+whitenoise*.log
 
 # Testing
 coverage/
@@ -55,6 +83,9 @@ coverage/
 dist/
 build/
 out/
+
+# Whitenoise data
+data/whitenoise/
 
 # Private keys and secrets
 *.pem

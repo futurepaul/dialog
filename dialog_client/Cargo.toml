@@ -6,8 +6,17 @@ edition = "2024"
 [lib]
 crate-type = ["lib", "cdylib"]
 
+[features]
+cli = ["uniffi/cli"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["cli"]
+
 [dependencies]
 anyhow = "1.0.98"
+hex = "0.4"
 nostr = { version = "0.42", features = ["nip44"] }
 nostr-sdk = "0.42.0"
 openmls = "0.6.0"
@@ -17,6 +26,10 @@ tokio = "1.45.1"
 tracing = "0.1.41"
 uniffi = "0.29.3"
 thiserror = "1.0"
+whitenoise = { git = "https://github.com/parres-hq/whitenoise", version = "0.1.0" }
+
+[build-dependencies]
+uniffi = { version = "0.29.3", features = ["build"] }
 
 [dev-dependencies]
 uniffi = { version = "0.29.3", features = ["cli"] }

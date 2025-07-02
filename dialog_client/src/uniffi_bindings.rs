@@ -1,12 +1,12 @@
 use crate::DialogClient as CoreDialogClient;
 use anyhow::Result;
-use nostr_sdk::prelude::*;
+use whitenoise::{PublicKey, Event};
+use nostr::EventId;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 
 // Error types for UniFFI
 #[derive(Debug, thiserror::Error, uniffi::Error)]
-#[uniffi(flat_error)]
 pub enum ClientError {
     #[error("Invalid key: {message}")]
     InvalidKey { message: String },
@@ -124,26 +124,33 @@ impl DialogClient {
     }
 
     pub fn get_public_key(&self) -> String {
-        self.core.get_public_key().to_hex()
+        self.core.get_public_key()
+            .map(|pk| pk.to_hex())
+            .unwrap_or_else(|| "No public key available".to_string())
     }
 
     pub fn get_secret_key_hex(&self) -> String {
-        self.core.get_secret_key_hex()
+        self.runtime.block_on(async {
+            self.core.get_secret_key_hex().await
+                .unwrap_or(None)
+                .unwrap_or_else(|| "No secret key available".to_string())
+        })
     }
 
-    pub fn send_encrypted_message(&self, recipient_pubkey: String, content: String) -> Result<String, ClientError> {
-        let pubkey = PublicKey::from_hex(&recipient_pubkey).map_err(|e| ClientError::InvalidKey {
-            message: format!("Invalid recipient public key: {}", e),
-        })?;
+    // TODO: Fix type compatibility between whitenoise and nostr_sdk types
+    // pub fn send_encrypted_message(&self, recipient_pubkey: String, content: String) -> Result<String, ClientError> {
+    //     let pubkey = PublicKey::from_hex(&recipient_pubkey).map_err(|e| ClientError::InvalidKey {
+    //         message: format!("Invalid recipient public key: {}", e),
+    //     })?;
 
-        let event_id = self.runtime.block_on(async {
-            self.core.send_encrypted_message(&pubkey, &content).await
-        }).map_err(|e| ClientError::EncryptionError {
-            message: e.to_string(),
-        })?;
+    //     let event_id = self.rt.block_on(async {
+    //         self.core.send_encrypted_message(&pubkey, &content).await
+    //     }).map_err(|e| ClientError::EncryptionError {
+    //         message: e.to_string(),
+    //     })?;
 
-        Ok(event_id.to_hex())
-    }
+    //     Ok(event_id.to_hex())
+    // }
 
     pub fn get_encrypted_messages(&self) -> Result<Vec<EncryptedMessage>, ClientError> {
         let events = self.runtime.block_on(async {
@@ -162,52 +169,101 @@ impl DialogClient {
         Ok(messages)
     }
 
-    pub fn decrypt_message(&self, sender_pubkey: String, encrypted_content: String) -> Result<String, ClientError> {
-        let pubkey = PublicKey::from_hex(&sender_pubkey).map_err(|e| ClientError::InvalidKey {
-            message: format!("Invalid sender public key: {}", e),
-        })?;
+    // TODO: Fix type compatibility
+    // pub fn decrypt_message(&self, sender_pubkey: String, encrypted_content: String) -> Result<String, ClientError> {
+    //     let pubkey = PublicKey::from_hex(&sender_pubkey).map_err(|e| ClientError::InvalidKey {
+    //         message: format!("Invalid sender public key: {}", e),
+    //     })?;
 
-        let decrypted = self.core.decrypt_message(&pubkey, &encrypted_content).map_err(|e| ClientError::EncryptionError {
-            message: e.to_string(),
-        })?;
+    //     let decrypted = self.core.decrypt_message(&pubkey, &encrypted_content).map_err(|e| ClientError::EncryptionError {
+    //         message: e.to_string(),
+    //     })?;
 
-        Ok(decrypted)
-    }
+    //     Ok(decrypted)
+    // }
 
     pub fn create_group(&self, group_name: String, member_pubkeys: Vec<String>) -> Result<String, ClientError> {
-        let pubkeys: Result<Vec<PublicKey>, _> = member_pubkeys.iter()
-            .map(|hex| PublicKey::from_hex(hex))
+        let pubkeys: Result<Vec<whitenoise::PublicKey>, _> = member_pubkeys.iter()
+            .map(|hex| whitenoise::PublicKey::from_hex(hex))
             .collect();
         
         let pubkeys = pubkeys.map_err(|e| ClientError::InvalidKey {
             message: format!("Invalid member public key: {}", e),
         })?;
 
-        let event_id = self.runtime.block_on(async {
+        let group_id = self.runtime.block_on(async {
             self.core.create_group(&group_name, pubkeys).await
         }).map_err(|e| ClientError::Generic {
             message: e.to_string(),
         })?;
 
-        Ok(event_id.to_hex())
+        Ok(group_id)
     }
 
     pub fn send_group_message(&self, group_id: String, content: String, member_pubkeys: Vec<String>) -> Result<String, ClientError> {
-        let pubkeys: Result<Vec<PublicKey>, _> = member_pubkeys.iter()
-            .map(|hex| PublicKey::from_hex(hex))
+        let pubkeys: Result<Vec<whitenoise::PublicKey>, _> = member_pubkeys.iter()
+            .map(|hex| whitenoise::PublicKey::from_hex(hex))
+            .collect();
+        
+        let _pubkeys = pubkeys.map_err(|e| ClientError::InvalidKey {
+            message: format!("Invalid member public key: {}", e),
+        })?;
+
+        let message_id = self.runtime.block_on(async {
+            self.core.send_group_message(&group_id, &content, &[]).await
+        }).map_err(|e| ClientError::Generic {
+            message: e.to_string(),
+        })?;
+
+        Ok(message_id)
+    }
+
+    pub fn fetch_groups(&self) -> Result<Vec<String>, ClientError> {
+        self.runtime.block_on(async {
+            self.core.fetch_groups().await
+        }).map_err(|e| ClientError::Generic {
+            message: e.to_string(),
+        })
+    }
+
+    pub fn fetch_group_messages(&self, group_id: String) -> Result<Vec<String>, ClientError> {
+        self.runtime.block_on(async {
+            self.core.fetch_group_messages(&group_id).await
+        }).map_err(|e| ClientError::Generic {
+            message: e.to_string(),
+        })
+    }
+
+    pub fn add_members_to_group(&self, group_id: String, new_member_pubkeys: Vec<String>) -> Result<(), ClientError> {
+        let pubkeys: Result<Vec<whitenoise::PublicKey>, _> = new_member_pubkeys.iter()
+            .map(|hex| whitenoise::PublicKey::from_hex(hex))
             .collect();
         
         let pubkeys = pubkeys.map_err(|e| ClientError::InvalidKey {
             message: format!("Invalid member public key: {}", e),
         })?;
 
-        let event_id = self.runtime.block_on(async {
-            self.core.send_group_message(&group_id, &content, &pubkeys).await
+        self.runtime.block_on(async {
+            self.core.add_members_to_group(&group_id, pubkeys).await
         }).map_err(|e| ClientError::Generic {
             message: e.to_string(),
+        })
+    }
+
+    pub fn remove_members_from_group(&self, group_id: String, member_pubkeys_to_remove: Vec<String>) -> Result<(), ClientError> {
+        let pubkeys: Result<Vec<whitenoise::PublicKey>, _> = member_pubkeys_to_remove.iter()
+            .map(|hex| whitenoise::PublicKey::from_hex(hex))
+            .collect();
+        
+        let pubkeys = pubkeys.map_err(|e| ClientError::InvalidKey {
+            message: format!("Invalid member public key: {}", e),
         })?;
 
-        Ok(event_id.to_hex())
+        self.runtime.block_on(async {
+            self.core.remove_members_from_group(&group_id, pubkeys).await
+        }).map_err(|e| ClientError::Generic {
+            message: e.to_string(),
+        })
     }
 }
 
