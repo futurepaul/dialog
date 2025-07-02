@@ -42,10 +42,12 @@ struct ContentView: View {
 }
 
 struct KeysView: View {
-    @State private var publicKey = "Loading..."
-    @State private var secretKey = "Loading..."
+    // @State private var client: DialogClient?
+    @State private var secretKey = "Hidden for security"
     @State private var relayUrl = "ws://127.0.0.1:7979"
+    @State private var connectionError: String?
     @State private var isConnected = false
+    @State private var publicKey = "Test Key - Dialog Client Integration"
     
     var body: some View {
         NavigationView {
@@ -123,22 +125,53 @@ struct KeysView: View {
     }
     
     private func initializeClient() {
-        // TODO: Initialize DialogClient via UniFFI
-        // For now, use mock data
-        publicKey = "c4bbc395bf52bffb9e1b30a49a5f71142ac202f143e4db5556abc1b33c965227"
-        secretKey = "d6d579ad23f4ddefe9a9db062be4f3afe4dc200e60ebf5249117003704ce56a8"
+        // Temporary: Comment out DialogClient initialization for testing
+        // do {
+        //     client = try DialogClient()
+        //     publicKey = client?.getPublicKey() ?? "Error"
+        //     connectionError = nil
+        // } catch {
+        //     connectionError = "Failed to initialize client: \(error.localizedDescription)"
+        // }
+        publicKey = "Demo Public Key - 1234567890abcdef"
+        connectionError = nil
     }
     
     private func generateNewKeys() {
-        // TODO: Call DialogClient.new() via UniFFI
-        // For now, use mock data
-        publicKey = "5fec84110135b91092aaac6bc7bb1a915c946ef8dce19017ecaee8eda9bc5fea"
-        secretKey = "7a199e5bc77481b7f6b4738005f01afb4abe14136f4951517edea7e782c0a46c"
+        // Temporary: Mock key generation
+        // do {
+        //     client = try DialogClient()
+        //     publicKey = client?.getPublicKey() ?? "Error"
+        //     connectionError = nil
+        // } catch {
+        //     connectionError = "Failed to generate new keys: \(error.localizedDescription)"
+        // }
+        publicKey = "New Demo Key - \(UUID().uuidString.prefix(16))"
+        connectionError = nil
     }
     
     private func toggleConnection() {
-        // TODO: Call DialogClient.connect_to_relay() via UniFFI
+        // Temporary: Mock connection toggle
+        // guard let client = client else {
+        //     connectionError = "Client not initialized"
+        //     return
+        // }
+        // 
+        // do {
+        //     if isConnected {
+        //         try client.disconnectFromRelay()
+        //         isConnected = false
+        //     } else {
+        //         try client.connectToRelay(relayUrl: relayUrl)
+        //         isConnected = true
+        //     }
+        //     connectionError = nil
+        // } catch {
+        //     connectionError = "Connection error: \(error.localizedDescription)"
+        // }
+        
         isConnected.toggle()
+        connectionError = isConnected ? nil : "Mock disconnection"
     }
     
     private func copyToClipboard(_ text: String) {
@@ -151,19 +184,24 @@ struct KeysView: View {
 }
 
 struct MessagesView: View {
-    @State private var messages: [EncryptedMessageData] = []
+    // @State private var client: DialogClient?
     @State private var newMessage = ""
-    @State private var recipientPubkey = ""
     @State private var showingCompose = false
+    @State private var errorMessage: String?
+    @State private var notes: [MockNoteData] = []
     
     var body: some View {
         NavigationView {
             VStack {
-                List(messages) { message in
-                    MessageRow(message: message)
+                List {
+                    Section("Notes") {
+                        ForEach(notes) { note in
+                            MockNoteRow(note: note)
+                        }
+                    }
                 }
                 
-                if messages.isEmpty {
+                if notes.isEmpty {
                     VStack {
                         Image(systemName: "message.circle")
                             .font(.system(size: 60))
@@ -171,7 +209,7 @@ struct MessagesView: View {
                         Text("No messages yet")
                             .font(.headline)
                             .foregroundColor(.gray)
-                        Text("Send your first encrypted message!")
+                        Text("Publish your first note!")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
@@ -195,60 +233,91 @@ struct MessagesView: View {
                 }
             }
             .sheet(isPresented: $showingCompose) {
-                ComposeMessageView(
-                    recipientPubkey: $recipientPubkey,
+                ComposeNoteView(
                     newMessage: $newMessage,
-                    onSend: sendMessage
+                    onSend: publishNote
                 )
             }
         }
         .onAppear {
+            initializeClient()
             fetchMessages()
         }
     }
     
-    private func fetchMessages() {
-        // TODO: Call DialogClient.get_encrypted_messages() via UniFFI
-        // For now, use mock data
-        messages = [
-            EncryptedMessageData(
-                id: "1",
-                content: "Hello! This is an encrypted message.",
-                sender: "5fec8411...",
-                timestamp: Date().addingTimeInterval(-3600)
-            ),
-            EncryptedMessageData(
-                id: "2", 
-                content: "Hi there! I got your message.",
-                sender: "96088dbf...",
-                timestamp: Date().addingTimeInterval(-1800)
-            )
-        ]
+    private func initializeClient() {
+        // Temporary: Mock initialization
+        // do {
+        //     client = try DialogClient()
+        //     try client?.connectToRelay(relayUrl: "ws://127.0.0.1:7979")
+        //     errorMessage = nil
+        // } catch {
+        //     errorMessage = "Failed to initialize client: \(error.localizedDescription)"
+        // }
+        errorMessage = nil
     }
     
-    private func sendMessage() {
-        // TODO: Call DialogClient.send_encrypted_message() via UniFFI
-        let newMsg = EncryptedMessageData(
+    private func fetchMessages() {
+        // Temporary: Mock message fetching
+        // guard let client = client else {
+        //     errorMessage = "Client not initialized"
+        //     return
+        // }
+        // 
+        // do {
+        //     notes = try client.fetchNotes(limit: 50)
+        //     errorMessage = nil
+        // } catch {
+        //     errorMessage = "Failed to fetch messages: \(error.localizedDescription)"
+        // }
+        
+        notes = [
+            MockNoteData(id: "1", content: "Hello from whitenoise!", author: "user123", createdAt: UInt64(Date().timeIntervalSince1970)),
+            MockNoteData(id: "2", content: "Testing the app integration", author: "user456", createdAt: UInt64(Date().timeIntervalSince1970 - 3600))
+        ]
+        errorMessage = nil
+    }
+    
+    private func publishNote() {
+        // Temporary: Mock note publishing
+        // guard let client = client else {
+        //     errorMessage = "Client not initialized"
+        //     return
+        // }
+        // 
+        // do {
+        //     try client.publishNote(content: newMessage)
+        //     newMessage = ""
+        //     showingCompose = false
+        //     fetchMessages() // Refresh after publishing
+        // } catch {
+        //     errorMessage = "Failed to publish note: \(error.localizedDescription)"
+        // }
+        
+        let newNote = MockNoteData(
             id: UUID().uuidString,
             content: newMessage,
-            sender: "You",
-            timestamp: Date()
+            author: "currentuser",
+            createdAt: UInt64(Date().timeIntervalSince1970)
         )
-        messages.append(newMsg)
+        notes.insert(newNote, at: 0)
         newMessage = ""
         showingCompose = false
+        errorMessage = nil
     }
 }
 
 struct GroupsView: View {
-    @State private var groups: [GroupData] = []
+    // @State private var dialogClient: DialogClient?
+    @State private var groups: [String] = []
     @State private var showingCreateGroup = false
+    @State private var errorMessage: String?
     
     var body: some View {
         NavigationView {
             VStack {
-                List(groups) { group in
-                    GroupRow(group: group)
+                List(groups, id: \.self) { groupId in
+                    GroupRowSimple(groupId: groupId)
                 }
                 
                 if groups.isEmpty {
@@ -281,75 +350,125 @@ struct GroupsView: View {
             }
         }
         .onAppear {
+            initializeClient()
             fetchGroups()
         }
     }
     
+    private func initializeClient() {
+        // Temporary: Mock client initialization
+        // do {
+        //     dialogClient = try DialogClient()
+        //     try dialogClient?.connectToRelay(relayUrl: "ws://127.0.0.1:7979")
+        //     errorMessage = nil
+        // } catch {
+        //     errorMessage = error.localizedDescription
+        // }
+        errorMessage = nil
+    }
+    
     private func fetchGroups() {
-        // TODO: Fetch groups from relay
-        // For now, use mock data
-        groups = [
-            GroupData(
-                id: "1",
-                name: "Test Group",
-                memberCount: 3,
-                lastMessage: "Welcome to the group!"
-            )
-        ]
+        // Temporary: Mock group fetching
+        // guard let client = dialogClient else {
+        //     errorMessage = "Client not initialized"
+        //     return
+        // }
+        // 
+        // do {
+        //     groups = try client.fetchGroups()
+        //     errorMessage = nil
+        // } catch {
+        //     errorMessage = error.localizedDescription
+        // }
+        
+        groups = ["whitenoise-group-1", "demo-group-abc123"]
+        errorMessage = nil
     }
     
     private func createGroup(name: String, members: [String]) {
-        // TODO: Call DialogClient.create_group() via UniFFI
-        let newGroup = GroupData(
-            id: UUID().uuidString,
-            name: name,
-            memberCount: members.count + 1,
-            lastMessage: "Group created"
-        )
-        groups.append(newGroup)
+        // Temporary: Mock group creation
+        // guard let client = dialogClient else {
+        //     errorMessage = "Client not initialized"
+        //     return
+        // }
+        // 
+        // do {
+        //     let groupId = try client.createGroup(groupName: name, memberPubkeys: members)
+        //     groups.append(groupId)
+        //     showingCreateGroup = false
+        //     errorMessage = nil
+        // } catch {
+        //     errorMessage = error.localizedDescription
+        // }
+        
+        let newGroupId = "\(name.lowercased())-\(UUID().uuidString.prefix(8))"
+        groups.append(newGroupId)
         showingCreateGroup = false
+        errorMessage = nil
     }
 }
 
 // MARK: - Supporting Views
 
-struct MessageRow: View {
-    let message: EncryptedMessageData
+struct NoteRow: View {
+    let note: NoteData
     
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Text(message.sender)
+                Text(note.shortPubkey)
                     .font(.caption)
                     .foregroundColor(.secondary)
                 Spacer()
-                Text(message.timestamp, style: .time)
+                Text(note.formattedDate)
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
             
-            Text(message.content)
+            Text(note.content)
                 .font(.body)
         }
         .padding(.vertical, 2)
     }
 }
 
-struct GroupRow: View {
-    let group: GroupData
+struct MockNoteRow: View {
+    let note: MockNoteData
     
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Text(group.name)
-                    .font(.headline)
+                Text(note.shortPubkey)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
                 Spacer()
-                Text("\(group.memberCount) members")
+                Text(note.formattedDate)
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
             
-            Text(group.lastMessage)
+            Text(note.content)
+                .font(.body)
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+struct GroupRowSimple: View {
+    let groupId: String
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Group")
+                    .font(.headline)
+                Spacer()
+                Text("ID: \(groupId.prefix(8))...")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            
+            Text("Group ID: \(groupId)")
                 .font(.caption)
                 .foregroundColor(.secondary)
         }
@@ -357,8 +476,7 @@ struct GroupRow: View {
     }
 }
 
-struct ComposeMessageView: View {
-    @Binding var recipientPubkey: String
+struct ComposeNoteView: View {
     @Binding var newMessage: String
     let onSend: () -> Void
     @Environment(\.dismiss) private var dismiss
@@ -367,18 +485,10 @@ struct ComposeMessageView: View {
         NavigationView {
             VStack(spacing: 20) {
                 VStack(alignment: .leading) {
-                    Text("Recipient Public Key")
-                        .font(.headline)
-                    TextField("Enter public key...", text: $recipientPubkey)
-                        .textFieldStyle(RoundedBorderTextFieldStyle())
-                        .font(.system(.body, design: .monospaced))
-                }
-                
-                VStack(alignment: .leading) {
-                    Text("Message")
+                    Text("Note Content")
                         .font(.headline)
                     TextEditor(text: $newMessage)
-                        .frame(minHeight: 100)
+                        .frame(minHeight: 150)
                         .overlay(
                             RoundedRectangle(cornerRadius: 8)
                                 .stroke(Color.gray.opacity(0.3), lineWidth: 1)
@@ -388,7 +498,7 @@ struct ComposeMessageView: View {
                 Spacer()
             }
             .padding()
-            .navigationTitle("New Message")
+            .navigationTitle("New Note")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") {
@@ -397,10 +507,10 @@ struct ComposeMessageView: View {
                 }
                 
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Send") {
+                    Button("Publish") {
                         onSend()
                     }
-                    .disabled(recipientPubkey.isEmpty || newMessage.isEmpty)
+                    .disabled(newMessage.isEmpty)
                 }
             }
         }
@@ -465,20 +575,43 @@ struct CreateGroupView: View {
 }
 
 // MARK: - Data Models
+// Using UniFFI DialogClient with whitenoise integration
 
-struct EncryptedMessageData: Identifiable {
+// Temporary mock data structure for testing
+struct MockNoteData: Identifiable {
     let id: String
     let content: String
-    let sender: String
-    let timestamp: Date
+    let author: String
+    let createdAt: UInt64
+    
+    var shortPubkey: String {
+        return String(author.prefix(8)) + "..."
+    }
+    
+    var formattedDate: String {
+        let date = Date(timeIntervalSince1970: TimeInterval(createdAt))
+        let formatter = DateFormatter()
+        formatter.dateStyle = .short
+        formatter.timeStyle = .short
+        return formatter.string(from: date)
+    }
 }
 
-struct GroupData: Identifiable {
-    let id: String
-    let name: String
-    let memberCount: Int
-    let lastMessage: String
-}
+// Extensions for NoteData to provide UI helper properties (commented out for now)
+// extension NoteData: Identifiable {
+//     public var shortPubkey: String {
+//         let pubkey = author
+//         return String(pubkey.prefix(8)) + "..."
+//     }
+//     
+//     public var formattedDate: String {
+//         let date = Date(timeIntervalSince1970: TimeInterval(createdAt))
+//         let formatter = DateFormatter()
+//         formatter.dateStyle = .short
+//         formatter.timeStyle = .short
+//         return formatter.string(from: date)
+//     }
+// }
 
 #Preview {
     ContentView()

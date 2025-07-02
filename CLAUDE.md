@@ -153,3 +153,8 @@ Clap derive macros with subcommands. Each command handles its own relay connecti
 - [ ] Complete iOS app UI integration with dialog_ios package
 - [ ] Add NIP-42 authentication to relay
 - [ ] Enhanced group management and administration features
+
+## Development Instructions
+
+### Long-Running Processes
+- Ask me to run ANY long-running process like a dev server or a nostr relay. If I run it myself I can monitor it.

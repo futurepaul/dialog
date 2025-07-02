@@ -16,11 +16,15 @@ let package = Package(
     targets: [
         .target(
             name: "DialogClient",
-            dependencies: ["DialogClientFFI"]
+            dependencies: ["DialogClientFFI"],
+            linkerSettings: [
+                .linkedLibrary("dialog_client"),
+                .unsafeFlags(["-L", "./Sources/DialogClient"])
+            ]
         ),
-        .binaryTarget(
+        .systemLibrary(
             name: "DialogClientFFI",
-            path: "./DialogClientFFI.xcframework"
+            path: "./Sources/DialogClient"
         ),
         .testTarget(
             name: "DialogClientTests",

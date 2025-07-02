@@ -1,0 +1,13 @@
+[package]
+name = "simple-test"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "simple_test"
+path = "simple_test_cli.rs"
+
+[dependencies]
+anyhow = "1.0"
+tokio = { version = "1", features = ["full"] }
+nostr-sdk = "0.33"

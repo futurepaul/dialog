@@ -5,6 +5,7 @@ use tracing::info;
 use whitenoise::{Whitenoise, WhitenoiseConfig, Account};
 pub use whitenoise::{PublicKey, Event};
 pub use nostr::{EventId, Tag};
+use nostr_sdk::prelude::*;
 
 // Import MLS types from whitenoise
 use whitenoise::{
@@ -12,6 +13,10 @@ use whitenoise::{
 };
 
 // Re-export types for CLI usage - done above
+
+// Simple client for testing (bypasses whitenoise)
+mod simple_client;
+pub use simple_client::*;
 
 // UniFFI support
 mod uniffi_bindings;

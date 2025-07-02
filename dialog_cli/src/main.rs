@@ -1,8 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use dialog_client::{DialogClient, PublicKey};
-// Note: Using whitenoise types now
-// use nostr_sdk::prelude::*;
 use tracing::info;
 use tokio::time::{sleep, Duration};
 
@@ -20,6 +18,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Publish a text note to the relay (simple mode, no keychain)
+    Simple {
+        /// The relay URL to connect to
+        #[arg(short, long, default_value = "ws://127.0.0.1:7979")]
+        relay: String,
+        /// The text content of the note
+        message: String,
+    },
     /// Publish a text note to the relay
     Publish {
         /// The relay URL to connect to
@@ -95,13 +101,18 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    // Skip tracing initialization when using whitenoise - it handles its own tracing setup
+    // let _ = tracing_subscriber::fmt::try_init();
     
     let cli = Cli::parse();
     
     let key = cli.key.as_deref();
     
     match cli.command {
+        Commands::Simple { relay, message } => {
+            // Use whitenoise for simple mode too - no custom nostr-sdk
+            publish_note(&relay, &message, key).await?;
+        }
         Commands::Publish { relay, message } => {
             publish_note(&relay, &message, key).await?;
         }
@@ -325,6 +336,7 @@ async fn send_group_message(relay_url: &str, group_id: &str, message: &str, key:
     
     Ok(())
 }
+
 
 async fn show_key(key: Option<&str>) -> Result<()> {
     let client = create_client(key).await?;
