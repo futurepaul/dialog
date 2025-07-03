@@ -23,6 +23,7 @@ nostr-sdk = { version = "0.42", git="https://github.com/rust-nostr/nostr", rev="
     "nip47",
     "nip59",
 ] }
+nostr-mls-storage = { version = "0.42", git="https://github.com/rust-nostr/nostr", rev="5a1aacb2fecdb4177574345a1b07ffbfa99e006d" }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] } 
 tempfile = "3.20.0"
