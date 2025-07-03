@@ -7,6 +7,9 @@ use tracing::info;
 
 #[tokio::test]
 async fn mls_persistence_storage_test() -> Result<()> {
+    // Ensure tracing logs appear when running `--nocapture`
+    let _ = tracing_subscriber::fmt::try_init();
+
     // Setup temporary directories for Alice and Bob storage
     let alice_dir = TempDir::new()?;
     let bob_dir = TempDir::new()?;
