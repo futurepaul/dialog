@@ -1,9 +1,33 @@
 [workspace]
-resolver = "2"
 members = [
-    "dialog_client",
-    "dialog_relay",
     "dialog_cli",
-    "dialog_deploy",
 ]
-# Common dependencies can be defined here
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Your Name <your.email@example.com>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/yourusername/denoise"
+
+[workspace.dependencies]
+# Common dependencies used across the workspace
+nostr = { version = "0.42", git="https://github.com/rust-nostr/nostr", rev="102388eb1d613b59e45b5b683f01da4959665692", features = [ "std" ] }
+nostr-mls = { version = "0.42", git="https://github.com/rust-nostr/nostr", rev="102388eb1d613b59e45b5b683f01da4959665692" }
+nostr-mls-sqlite-storage = { version = "0.42", git="https://github.com/rust-nostr/nostr", rev="102388eb1d613b59e45b5b683f01da4959665692" }
+nostr-sdk = { version = "0.42", git="https://github.com/rust-nostr/nostr", rev="102388eb1d613b59e45b5b683f01da4959665692", features = [
+    "lmdb",
+    "nip04",
+    "nip44",
+    "nip47",
+    "nip59",
+] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] } 
+tempfile = "3.20.0"
+sqlx = { version = "0.8", features = [ "runtime-tokio", "sqlite", "migrate", "macros", "chrono", "derive", "json" ] }
+thiserror = "2.0.12"
+tokio = { version = "1.44", features = ["full"] }
+clap = "4.5.40"
+dotenv = "0.15"

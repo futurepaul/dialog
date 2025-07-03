@@ -1,354 +1,467 @@
-use anyhow::Result;
-use clap::{Parser, Subcommand};
-use dialog_client::{DialogClient, PublicKey};
-use tracing::info;
-use tokio::time::{sleep, Duration};
+use clap::{Arg, Command};
+use dotenv::{dotenv, from_path};
+use nostr_mls::prelude::*;
+use nostr_mls_sqlite_storage::NostrMlsSqliteStorage;
+use nostr_sdk::prelude::*;
+use std::{env, path::PathBuf};
+use tempfile::TempDir;
+use thiserror::Error;
+use tracing::Level;
+use tracing_subscriber::FmtSubscriber;
+use nip04;
 
-#[derive(Parser)]
-#[command(name = "dialog_cli")]
-#[command(about = "A CLI tool for testing dialog client and relay functionality")]
-struct Cli {
-    /// Use a specific secret key (hex format) instead of generating a new one
-    #[arg(long, global = true)]
-    key: Option<String>,
-    
-    #[command(subcommand)]
-    command: Commands,
+/// Generate a new identity and return the keys, NostrMls instance, and temp directory
+/// We use a different temp directory for each identity because OpenMLS doesn't have a concept of partitioning storage for different identities.
+/// Because of this, we need to create diffrent databases for each identity.
+fn generate_identity_with_key(
+    sk_hex: &str,
+) -> Result<(Keys, NostrMls<NostrMlsSqliteStorage>, TempDir), Box<dyn std::error::Error>> {
+    let keys = Keys::parse(sk_hex)?;
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let db_path = temp_dir.path().join("mls.db");
+    let nostr_mls = NostrMls::new(NostrMlsSqliteStorage::new(db_path).unwrap());
+    Ok((keys, nostr_mls, temp_dir))
 }
 
-#[derive(Subcommand)]
-enum Commands {
-    /// Publish a text note to the relay (simple mode, no keychain)
-    Simple {
-        /// The relay URL to connect to
-        #[arg(short, long, default_value = "ws://127.0.0.1:7979")]
-        relay: String,
-        /// The text content of the note
-        message: String,
-    },
-    /// Publish a text note to the relay
-    Publish {
-        /// The relay URL to connect to
-        #[arg(short, long, default_value = "ws://127.0.0.1:7979")]
-        relay: String,
-        /// The text content of the note
-        message: String,
-    },
-    /// Fetch and display notes from the relay
-    Fetch {
-        /// The relay URL to connect to
-        #[arg(short, long, default_value = "ws://127.0.0.1:7979")]
-        relay: String,
-        /// Number of notes to fetch
-        #[arg(short, long, default_value = "10")]
-        limit: usize,
-    },
-    /// Interactive test: publish then fetch notes
-    Test {
-        /// The relay URL to connect to
-        #[arg(short, long, default_value = "ws://127.0.0.1:7979")]
-        relay: String,
-        /// Test message to publish
-        #[arg(short, long, default_value = "Hello from dialog_cli!")]
-        message: String,
-    },
-    /// Send an encrypted message to a recipient
-    SendEncrypted {
-        /// The relay URL to connect to
-        #[arg(short, long, default_value = "ws://127.0.0.1:7979")]
-        relay: String,
-        /// Recipient's public key (hex format)
-        #[arg(short = 'p', long)]
-        recipient: String,
-        /// The encrypted message content
-        message: String,
-    },
-    /// Fetch and decrypt encrypted messages
-    FetchEncrypted {
-        /// The relay URL to connect to
-        #[arg(short, long, default_value = "ws://127.0.0.1:7979")]
-        relay: String,
-        /// Number of messages to fetch
-        #[arg(short, long, default_value = "10")]
-        limit: usize,
-    },
-    /// Create a new group
-    CreateGroup {
-        /// The relay URL to connect to
-        #[arg(short, long, default_value = "ws://127.0.0.1:7979")]
-        relay: String,
-        /// Group name
-        #[arg(short, long)]
-        name: String,
-        /// Member public keys (comma-separated hex format)
-        #[arg(short, long)]
-        members: String,
-    },
-    /// Send a message to a group
-    SendGroupMessage {
-        /// The relay URL to connect to
-        #[arg(short, long, default_value = "ws://127.0.0.1:7979")]
-        relay: String,
-        /// Group identifier
-        #[arg(short, long)]
-        group_id: String,
-        /// The message content
-        message: String,
-    },
-    /// Show user's public key
-    ShowKey,
+/// Generate a new identity and return the keys, NostrMls instance, and temp directory
+/// We use a different temp directory for each identity because OpenMLS doesn't have a concept of partitioning storage for different identities.
+/// Because of this, we need to create diffrent databases for each identity.
+fn generate_identity() -> (Keys, NostrMls<NostrMlsSqliteStorage>, TempDir) {
+    let keys = Keys::generate();
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let db_path = temp_dir.path().join("mls.db");
+    let nostr_mls = NostrMls::new(NostrMlsSqliteStorage::new(db_path).unwrap());
+    (keys, nostr_mls, temp_dir)
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    // Skip tracing initialization when using whitenoise - it handles its own tracing setup
-    // let _ = tracing_subscriber::fmt::try_init();
-    
-    let cli = Cli::parse();
-    
-    let key = cli.key.as_deref();
-    
-    match cli.command {
-        Commands::Simple { relay, message } => {
-            // Use whitenoise for simple mode too - no custom nostr-sdk
-            publish_note(&relay, &message, key).await?;
-        }
-        Commands::Publish { relay, message } => {
-            publish_note(&relay, &message, key).await?;
-        }
-        Commands::Fetch { relay, limit } => {
-            fetch_notes(&relay, limit, key).await?;
-        }
-        Commands::Test { relay, message } => {
-            test_publish_and_fetch(&relay, &message, key).await?;
-        }
-        Commands::SendEncrypted { relay, recipient, message } => {
-            send_encrypted_message(&relay, &recipient, &message, key).await?;
-        }
-        Commands::FetchEncrypted { relay, limit } => {
-            fetch_encrypted_messages(&relay, limit, key).await?;
-        }
-        Commands::CreateGroup { relay, name, members } => {
-            create_group(&relay, &name, &members, key).await?;
-        }
-        Commands::SendGroupMessage { relay, group_id, message } => {
-            send_group_message(&relay, &group_id, &message, key).await?;
-        }
-        Commands::ShowKey => {
-            show_key(key).await?;
-        }
-    }
-    
-    Ok(())
-}
+fn find_and_load_env() {
+    // First try the standard dotenv() which looks for .env in current dir
+    dotenv().ok();
 
-async fn create_client(key: Option<&str>) -> Result<DialogClient> {
-    match key {
-        Some(secret_key_hex) => DialogClient::new_with_key(secret_key_hex).await,
-        None => DialogClient::new().await,
+    // Then walk up the directory tree looking for .env.local
+    let mut current_dir = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+    loop {
+        let env_file = current_dir.join(".env.local");
+        if env_file.exists() {
+            from_path(&env_file).ok();
+            break;
+        }
+
+        // Move up one directory
+        match current_dir.parent() {
+            Some(parent) => current_dir = parent.to_path_buf(),
+            None => break, // Reached filesystem root
+        }
     }
 }
 
-async fn publish_note(relay_url: &str, message: &str, key: Option<&str>) -> Result<()> {
-    info!("Creating client and connecting to relay...");
-    
-    let client = create_client(key).await?;
-    client.connect_to_relay(relay_url).await?;
-    
-    if let Some(pubkey) = client.get_public_key() {
-        info!("Client pubkey: {}", pubkey);
-    } else {
-        info!("Client pubkey: Not available");
-    }
-    
-    // Wait a moment for connection to establish
-    sleep(Duration::from_secs(1)).await;
-    
-    let event_id = client.publish_note(message).await?;
-    println!("✅ Published note with ID: {}", event_id);
-    
-    Ok(())
-}
-
-async fn fetch_notes(relay_url: &str, limit: usize, key: Option<&str>) -> Result<()> {
-    info!("Creating client and connecting to relay...");
-    
-    let client = create_client(key).await?;
-    client.connect_to_relay(relay_url).await?;
-    
-    // Wait a moment for connection to establish
-    sleep(Duration::from_secs(1)).await;
-    
-    let notes = client.get_notes(Some(limit)).await?;
-    
-    if notes.is_empty() {
-        println!("📝 No notes found on relay");
-    } else {
-        println!("📝 Found {} notes:", notes.len());
-        for note in notes {
-            println!("  🗒️  [{}] {}: {}", 
-                note.created_at, 
-                note.pubkey.to_hex()[..8].to_string() + "...",
-                note.content
-            );
+fn get_secret_key(key_arg: &str) -> Result<String, Box<dyn std::error::Error>> {
+    match key_arg {
+        "bob" => {
+            find_and_load_env();
+            env::var("BOB_SK_HEX")
+                .map_err(|_| "BOB_SK_HEX not found in environment variables".into())
         }
-    }
-    
-    Ok(())
-}
-
-async fn test_publish_and_fetch(relay_url: &str, message: &str, key: Option<&str>) -> Result<()> {
-    println!("🧪 Starting publish and fetch test...");
-    
-    // Publish a note
-    println!("1️⃣ Publishing note...");
-    publish_note(relay_url, message, key).await?;
-    
-    // Wait a moment
-    println!("⏱️ Waiting 2 seconds...");
-    sleep(Duration::from_secs(2)).await;
-    
-    // Fetch notes
-    println!("2️⃣ Fetching notes...");
-    fetch_notes(relay_url, 5, key).await?;
-    
-    println!("✅ Test completed!");
-    
-    Ok(())
-}
-
-async fn send_encrypted_message(relay_url: &str, recipient_hex: &str, message: &str, key: Option<&str>) -> Result<()> {
-    info!("Creating client and connecting to relay...");
-    
-    let client = create_client(key).await?;
-    client.connect_to_relay(relay_url).await?;
-    
-    // Parse recipient public key
-    let recipient_pubkey = PublicKey::from_hex(recipient_hex)?;
-    
-    if let Some(pubkey) = client.get_public_key() {
-        info!("Client pubkey: {}", pubkey);
-    } else {
-        info!("Client pubkey: Not available");
-    }
-    info!("Recipient pubkey: {}", recipient_pubkey);
-    
-    // Wait a moment for connection to establish
-    sleep(Duration::from_secs(1)).await;
-    
-    let event_id = client.send_encrypted_message(&recipient_pubkey, message).await?;
-    println!("🔐 Sent encrypted message with ID: {}", event_id);
-    
-    Ok(())
-}
-
-async fn fetch_encrypted_messages(relay_url: &str, limit: usize, key: Option<&str>) -> Result<()> {
-    info!("Creating client and connecting to relay...");
-    
-    let client = create_client(key).await?;
-    client.connect_to_relay(relay_url).await?;
-    
-    if let Some(pubkey) = client.get_public_key() {
-        info!("Client pubkey: {}", pubkey);
-    } else {
-        info!("Client pubkey: Not available");
-    }
-    
-    // Wait a moment for connection to establish
-    sleep(Duration::from_secs(1)).await;
-    
-    let messages = client.get_encrypted_messages().await?;
-    
-    if messages.is_empty() {
-        println!("🔐 No encrypted messages found");
-    } else {
-        println!("🔐 Found {} encrypted messages:", messages.len());
-        for msg in messages.iter().take(limit) {
-            // Try to decrypt the message
-            match client.decrypt_message(&msg.pubkey, &msg.content) {
-                Ok(decrypted) => {
-                    println!("  📨 [{}] from {}: {}", 
-                        msg.created_at,
-                        msg.pubkey.to_hex()[..8].to_string() + "...",
-                        decrypted
-                    );
-                }
-                Err(_) => {
-                    println!("  🔒 [{}] from {}: [Failed to decrypt]", 
-                        msg.created_at,
-                        msg.pubkey.to_hex()[..8].to_string() + "..."
-                    );
-                }
+        "alice" => {
+            find_and_load_env();
+            env::var("ALICE_SK_HEX")
+                .map_err(|_| "ALICE_SK_HEX not found in environment variables".into())
+        }
+        hex_key => {
+            // Validate that it looks like a hex string
+            if hex_key.len() == 64 && hex_key.chars().all(|c| c.is_ascii_hexdigit()) {
+                Ok(hex_key.to_string())
+            } else {
+                Err("Key must be either 'bob', 'alice', or a 64-character hex string".into())
             }
         }
     }
-    
-    Ok(())
 }
 
-async fn create_group(relay_url: &str, name: &str, members_str: &str, key: Option<&str>) -> Result<()> {
-    info!("Creating client and connecting to relay...");
-    
-    let client = create_client(key).await?;
-    client.connect_to_relay(relay_url).await?;
-    
-    // Parse member public keys
-    let members: Result<Vec<PublicKey>, _> = members_str
-        .split(',')
-        .map(|hex| PublicKey::parse(hex.trim()))
-        .collect();
-    let members = members?;
-    
-    if let Some(pubkey) = client.get_public_key() {
-        info!("Client pubkey: {}", pubkey);
-    } else {
-        info!("Client pubkey: Not available");
-    }
-    info!("Creating group '{}' with {} members", name, members.len());
-    
-    // Wait a moment for connection to establish
-    sleep(Duration::from_secs(1)).await;
-    
-    let event_id = client.create_group(name, members).await?;
-    println!("👥 Created group '{}' with ID: {}", name, event_id);
-    
-    Ok(())
+#[derive(Error, Debug)]
+enum DialogError {
+    #[error("Nostr MLS error: {0}")]
+    NostrMls(#[from] nostr_mls::Error),
+
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("Environment variable error: {0}")]
+    Env(#[from] std::env::VarError),
+
+    #[error("Parse error: {0}")]
+    Parse(#[from] std::num::ParseIntError),
+
+    #[error("Tracing error: {0}")]
+    Tracing(#[from] tracing::subscriber::SetGlobalDefaultError),
+
+    #[error("General error: {0}")]
+    General(#[from] Box<dyn std::error::Error>),
 }
 
-async fn send_group_message(relay_url: &str, group_id: &str, message: &str, key: Option<&str>) -> Result<()> {
-    info!("Creating client and connecting to relay...");
-    
-    let client = create_client(key).await?;
-    client.connect_to_relay(relay_url).await?;
-    
-    if let Some(pubkey) = client.get_public_key() {
-        info!("Client pubkey: {}", pubkey);
-    } else {
-        info!("Client pubkey: Not available");
-    }
-    
-    // Wait a moment for connection to establish
-    sleep(Duration::from_secs(1)).await;
-    
-    // For now, we'll send to an empty members list since we don't have group state management
-    let event_id = client.send_group_message(group_id, message, &[]).await?;
-    println!("👥 Sent group message to '{}' with ID: {}", group_id, event_id);
-    
-    Ok(())
-}
+#[tokio::main]
+async fn main() -> Result<(), DialogError> {
+    // Set up tracing
+    let subscriber = FmtSubscriber::builder()
+        .with_max_level(Level::INFO)
+        .finish();
+    tracing::subscriber::set_global_default(subscriber)?;
 
+    // Set up command line argument parsing using clap builder pattern
+    let matches = Command::new("dialog_cli")
+        .version("0.1.0")
+        .about("Dialog CLI for Nostr MLS")
+        .subcommand_required(true)
+        .arg_required_else_help(true)
+        .subcommand(
+            Command::new("publish-key")
+                .about("Generates and publishes a key package for the user")
+                .arg(
+                    Arg::new("key")
+                        .long("key")
+                        .value_name("KEY")
+                        .help("Secret key for identity: 'bob', 'alice', or hex string")
+                        .required(true),
+                ),
+        )
+        .subcommand(
+            Command::new("create-group")
+                .about("Creates a new group and invites a counterparty")
+                .arg(
+                    Arg::new("key")
+                        .long("key")
+                        .value_name("KEY")
+                        .help("Secret key for your identity")
+                        .required(true),
+                )
+                .arg(
+                    Arg::new("name")
+                        .long("name")
+                        .help("Name of the group")
+                        .required(true),
+                )
+                .arg(
+                    Arg::new("counterparty")
+                        .long("counterparty")
+                        .help("Public key of the counterparty to invite")
+                        .required(true),
+                ),
+        )
+        .subcommand(
+            Command::new("send-message")
+                .about("Sends a message to a group")
+                .arg(
+                    Arg::new("key")
+                        .long("key")
+                        .value_name("KEY")
+                        .help("Secret key for your identity")
+                        .required(true),
+                )
+                .arg(
+                    Arg::new("group-id")
+                        .long("group-id")
+                        .help("Hex-encoded ID of the group")
+                        .required(true),
+                )
+                .arg(
+                    Arg::new("message")
+                        .long("message")
+                        .help("Content of the message to send")
+                        .required(true),
+                ),
+        )
+        .subcommand(
+            Command::new("list-invites")
+                .about("Lists pending group invitations")
+                .arg(
+                    Arg::new("key")
+                        .long("key")
+                        .value_name("KEY")
+                        .help("Secret key for your identity")
+                        .required(true),
+                ),
+        )
+        .subcommand(
+            Command::new("accept-invite")
+                .about("Accepts a pending group invitation")
+                .arg(
+                    Arg::new("key")
+                        .long("key")
+                        .value_name("KEY")
+                        .help("Secret key for your identity")
+                        .required(true),
+                )
+                .arg(
+                    Arg::new("group-id")
+                        .long("group-id")
+                        .help("Hex-encoded ID of the group to join")
+                        .required(true),
+                ),
+        )
+        .subcommand(
+            Command::new("get-pubkey")
+                .about("Gets the public key from a secret key")
+                .arg(
+                    Arg::new("key")
+                        .long("key")
+                        .value_name("KEY")
+                        .help("Secret key for the identity")
+                        .required(true),
+                ),
+        )
+        .subcommand(Command::new("list").about("Lists all MLS key packages from the relay"))
+        .get_matches();
 
-async fn show_key(key: Option<&str>) -> Result<()> {
-    let client = create_client(key).await?;
-    if let Some(pubkey) = client.get_public_key() {
-        println!("🔑 Your public key: {}", pubkey);
-    } else {
-        println!("🔑 Your public key: Not available");
+    match matches.subcommand() {
+        Some(("publish-key", sub_matches)) => {
+            let key_arg = sub_matches.get_one::<String>("key").unwrap();
+            let sk_hex = get_secret_key(key_arg)?;
+            let (keys, nostr_mls, _temp_dir) = generate_identity_with_key(&sk_hex)?;
+            println!("Using provided key: {}", key_arg);
+
+            let relay_url = RelayUrl::parse("ws://localhost:8080").unwrap();
+
+            let (key_package_encoded, tags) =
+                nostr_mls.create_key_package_for_event(&keys.public_key(), [relay_url.clone()])?;
+
+            let key_package_event = EventBuilder::new(Kind::MlsKeyPackage, key_package_encoded)
+                .tags(tags)
+                .sign_with_keys(&keys)
+                .map_err(|e| DialogError::General(Box::new(e)))?;
+            println!("Key package event: {:?}", key_package_event);
+
+            let client = Client::new(keys.clone());
+            client
+                .add_relay(relay_url.to_string())
+                .await
+                .map_err(|e| DialogError::General(Box::new(e)))?;
+            client.connect().await;
+
+            println!("Publishing key package event...");
+            let output = client
+                .send_event(&key_package_event)
+                .await
+                .map_err(|e| DialogError::General(Box::new(e)))?;
+            println!(
+                "Event ID: {}",
+                output.id().to_bech32().map_err(|e| DialogError::General(Box::new(e)))?
+            );
+            println!("Sent to: {:?}", output.success);
+            println!("Not sent to: {:?}", output.failed);
+        }
+        Some(("create-group", sub_matches)) => {
+            let key_arg = sub_matches.get_one::<String>("key").unwrap();
+            let sk_hex = get_secret_key(key_arg)?;
+            let (keys, nostr_mls, _temp_dir) = generate_identity_with_key(&sk_hex)?;
+            println!("Using key for: {}", key_arg);
+
+            let group_name = sub_matches.get_one::<String>("name").unwrap();
+            let counterparty_pk_hex = sub_matches.get_one::<String>("counterparty").unwrap();
+            let counterparty_pk = PublicKey::from_hex(counterparty_pk_hex)
+                .map_err(|e| DialogError::General(Box::new(e)))?;
+
+            let relay_url_str = "ws://localhost:8080";
+            let client = Client::new(keys.clone());
+            client
+                .add_relay(relay_url_str)
+                .await
+                .map_err(|e| DialogError::General(Box::new(e)))?;
+            client.connect().await;
+
+            println!("Fetching key package for counterparty: {}", counterparty_pk.to_hex());
+            let filter = Filter::new()
+                .kind(Kind::MlsKeyPackage)
+                .author(counterparty_pk)
+                .limit(1);
+            let timeout = std::time::Duration::from_secs(10);
+
+            let events = client
+                .fetch_events(filter, timeout)
+                .await
+                .map_err(|e| DialogError::General(Box::new(e)))?;
+
+            if let Some(key_package_event) = events.first() {
+                println!("Found key package event for counterparty: {}", key_package_event.id);
+
+                let members = vec![keys.public_key(), counterparty_pk];
+                let relay_url = RelayUrl::parse(relay_url_str).unwrap();
+
+                let group_create_result = nostr_mls
+                    .create_group(
+                        group_name,
+                        "", // description
+                        &keys.public_key(),
+                        vec![key_package_event.clone()],
+                        members,
+                        vec![relay_url],
+                    )
+                    .map_err(|e| DialogError::General(Box::new(e)))?;
+
+                println!(
+                    "Group created successfully. MLS Group ID: {}",
+                    hex::encode(group_create_result.group.mls_group_id.as_slice())
+                );
+
+                let welcome_rumors = group_create_result.welcome_rumors;
+                println!("Publishing {} welcome rumor(s)...", welcome_rumors.len());
+
+                for rumor in welcome_rumors {
+                    let gift_wrap_event = EventBuilder::gift_wrap(&keys, &counterparty_pk, rumor, None)
+                        .await
+                        .map_err(|e| DialogError::General(Box::new(e)))?;
+
+                    println!("Publishing welcome rumor event (gift-wrapped): {}", gift_wrap_event.id);
+                    let output = client
+                        .send_event(&gift_wrap_event)
+                        .await
+                        .map_err(|e| DialogError::General(Box::new(e)))?;
+                    println!("Published welcome rumor event ID: {:?}", output.id());
+                }
+            } else {
+                println!("Could not find key package for counterparty on the relay.");
+            }
+        }
+        Some(("send-message", sub_matches)) => {
+            let key_arg = sub_matches.get_one::<String>("key").unwrap();
+            let sk_hex = get_secret_key(key_arg)?;
+            let (keys, nostr_mls, _temp_dir) = generate_identity_with_key(&sk_hex)?;
+            println!("Using key for: {}", key_arg);
+
+            let group_id_hex = sub_matches.get_one::<String>("group-id").unwrap();
+            let group_id_bytes = hex::decode(group_id_hex).map_err(|e| DialogError::General(Box::new(e)))?;
+            let group_id = GroupId::from_slice(&group_id_bytes);
+
+            let message = sub_matches.get_one::<String>("message").unwrap();
+
+            let rumor = EventBuilder::new(Kind::TextNote, message).build(keys.public_key());
+
+            let message_event = nostr_mls
+                .create_message(&group_id, rumor)
+                .map_err(|e| DialogError::General(Box::new(e)))?;
+
+            let relay_url_str = "ws://localhost:8080";
+            let client = Client::new(keys.clone());
+            client
+                .add_relay(relay_url_str)
+                .await
+                .map_err(|e| DialogError::General(Box::new(e)))?;
+            client.connect().await;
+
+            println!("Sending message event: {}", message_event.id);
+            let output = client
+                .send_event(&message_event)
+                .await
+                .map_err(|e| DialogError::General(Box::new(e)))?;
+
+            println!("Sent message event ID: {:?}", output.id());
+        }
+        Some(("list-invites", sub_matches)) => {
+            let key_arg = sub_matches.get_one::<String>("key").unwrap();
+            let sk_hex = get_secret_key(key_arg)?;
+            let (keys, nostr_mls, _temp_dir) = generate_identity_with_key(&sk_hex)?;
+            println!("Listing invites for: {}", key_arg);
+
+            let relay_url_str = "ws://localhost:8080";
+            let client = Client::new(keys.clone());
+            client
+                .add_relay(relay_url_str)
+                .await
+                .map_err(|e| DialogError::General(Box::new(e)))?;
+            client.connect().await;
+
+            let filter = Filter::new()
+                .kind(Kind::GiftWrap)
+                .pubkey(keys.public_key());
+
+            let events = client
+                .fetch_events(filter, std::time::Duration::from_secs(10))
+                .await
+                .map_err(|e| DialogError::General(Box::new(e)))?;
+
+            println!("Found {} potential invites", events.len());
+
+            for event in events {
+                if let Ok(rumor) = client.unwrap_gift_wrap(&event).await {
+                    nostr_mls.process_welcome(&event.id, &rumor.rumor)?;
+                }
+            }
+
+            let pending_welcomes = nostr_mls.get_pending_welcomes()?;
+            if pending_welcomes.is_empty() {
+                println!("No pending invites found.");
+            } else {
+                println!("Pending invites:");
+                for welcome in pending_welcomes {
+                    println!("  Group Name: {}", welcome.group_name);
+                    println!("  Group ID: {}", hex::encode(welcome.mls_group_id.as_slice()));
+                    println!("  Member Count: {}", welcome.member_count);
+                    println!("");
+                }
+            }
+        }
+        Some(("accept-invite", sub_matches)) => {
+            let key_arg = sub_matches.get_one::<String>("key").unwrap();
+            let sk_hex = get_secret_key(key_arg)?;
+            let (_keys, nostr_mls, _temp_dir) = generate_identity_with_key(&sk_hex)?;
+            println!("Accepting invite for: {}", key_arg);
+
+            let group_id_hex = sub_matches.get_one::<String>("group-id").unwrap();
+            let group_id_bytes = hex::decode(group_id_hex).map_err(|e| DialogError::General(Box::new(e)))?;
+            let group_id = GroupId::from_slice(&group_id_bytes);
+
+            let pending_welcomes = nostr_mls.get_pending_welcomes()?;
+            if let Some(welcome) = pending_welcomes
+                .iter()
+                .find(|w| w.mls_group_id == group_id)
+            {
+                nostr_mls.accept_welcome(welcome)?;
+                println!("Successfully joined group: {}", welcome.group_name);
+            } else {
+                println!("No pending invite found for group ID: {}", group_id_hex);
+            }
+        }
+        Some(("get-pubkey", sub_matches)) => {
+            let key_arg = sub_matches.get_one::<String>("key").unwrap();
+            let sk_hex = get_secret_key(key_arg)?;
+            let keys =
+                Keys::parse(&sk_hex).map_err(|e| DialogError::General(Box::new(e)))?;
+            println!("{}", keys.public_key().to_hex());
+        }
+        Some(("list", _sub_matches)) => {
+            println!("Listing key packages from relay...");
+            let relay_url = RelayUrl::parse("ws://localhost:8080").unwrap();
+            let client = Client::new(Keys::generate());
+            client
+                .add_relay(relay_url.to_string())
+                .await
+                .map_err(|e| DialogError::General(Box::new(e)))?;
+            client.connect().await;
+
+            let filter = Filter::new().kind(Kind::MlsKeyPackage);
+            let timeout = std::time::Duration::from_secs(10);
+
+            let events = client
+                .fetch_events(filter, timeout)
+                .await
+                .map_err(|e| DialogError::General(Box::new(e)))?;
+
+            if events.is_empty() {
+                println!("No key packages found.");
+            } else {
+                println!("Found {} key packages:", events.len());
+                for event in events {
+                    println!("- Event ID: {}", event.id);
+                    println!("  Public Key: {}", event.pubkey);
+                    println!("  Content: {}", event.content);
+                    println!("  Kind: {}", event.kind);
+                    println!("  Tags: {:?}", event.tags);
+                    println!("");
+                }
+            }
+        }
+        _ => unreachable!(),
     }
-    match client.get_secret_key_hex().await {
-        Ok(Some(secret)) => println!("🗝️  Your secret key: {}", secret),
-        Ok(None) => println!("🗝️  Your secret key: Not available"),
-        Err(e) => println!("🗝️  Your secret key: Error: {}", e),
-    }
+
     Ok(())
 }

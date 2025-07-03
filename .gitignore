@@ -104,3 +104,6 @@ keys/
 *.temp
 .tmp/
 .temp/
+
+# Target folders
+dialog_cli/target/
