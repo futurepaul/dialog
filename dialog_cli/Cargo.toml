@@ -16,3 +16,9 @@ sqlx = { workspace = true }
 thiserror = { workspace = true }
 clap = { workspace = true }
 dotenv = { workspace = true }
+hex = "0.4.3"
+
+[dev-dependencies]
+assert_cmd = "2.0"
+predicates = "3.0"
+anyhow = "1.0"

@@ -107,3 +107,8 @@ keys/
 
 # Target folders
 dialog_cli/target/
+
+prompts/
+
+# New code block
+.dialog_cli_data/
