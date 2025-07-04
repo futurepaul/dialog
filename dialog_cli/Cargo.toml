@@ -22,3 +22,5 @@ hex = "0.4.3"
 assert_cmd = "2.0"
 predicates = "3.0"
 anyhow = "1.0"
+nostr-mls-storage = { workspace = true }
+nostr-mls-memory-storage = { workspace = true }
