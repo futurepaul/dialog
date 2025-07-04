@@ -7,6 +7,7 @@ edition = "2021"
 nostr = { workspace = true }
 nostr-mls = { workspace = true }
 nostr-mls-sqlite-storage = { workspace = true }
+nostr-mls-memory-storage = { workspace = true }
 nostr-sdk = { workspace = true }
 tempfile = { workspace = true }
 tracing = { workspace = true }
@@ -23,4 +24,3 @@ assert_cmd = "2.0"
 predicates = "3.0"
 anyhow = "1.0"
 nostr-mls-storage = { workspace = true }
-nostr-mls-memory-storage = { workspace = true }

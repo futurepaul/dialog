@@ -2,139 +2,15 @@ use clap::{Arg, Command};
 use dotenv::{dotenv, from_path};
 use nostr_mls::prelude::*;
 use nostr_mls_sqlite_storage::NostrMlsSqliteStorage;
+use nostr_mls_memory_storage::NostrMlsMemoryStorage;
 use nostr_sdk::{prelude::*, nips::nip59};
 use nostr_mls::groups::NostrGroupConfigData;
 use std::{env, path::PathBuf, fs};
-use tempfile::TempDir;
 use thiserror::Error;
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
-// use nostr_mls::prelude::NostrGroupConfigData;
 
-/*
-MLS EPOCH SYNCHRONIZATION ANALYSIS
-=================================
 
-CURRENT ISSUE:
-- Alice creates group with Bob as member → group created at epoch 1
-- Alice sends message (encrypted with epoch 1 exporter secret)
-- Bob accepts welcome and joins at epoch 1
-- Bob tries to decrypt Alice's message but fails with:
-  "Failed to decrypt message with any exporter secret from epochs 0 to 1"
-
-KEY FINDINGS:
-1. Both Alice and Bob report being at epoch 1 after their operations
-2. Bob has exporter secrets for epochs 0 and 1
-3. Alice's message cannot be decrypted with ANY of Bob's secrets
-4. This suggests Alice and Bob have DIFFERENT epoch 1 states (diverged group state)
-
-THEORY:
-When Alice creates the group:
-- Group starts at epoch 0
-- add_members() advances to epoch 1 
-- merge_pending_commit() finalizes epoch 1
-- Alice's group state is finalized at epoch 1
-
-When Bob accepts welcome:
-- Bob receives welcome for epoch 1
-- Bob joins at epoch 1
-- But Bob's epoch 1 state may be different from Alice's epoch 1 state
-
-ROOT CAUSE HYPOTHESIS:
-The issue is that Bob's join creates a state change that Alice needs to be aware of.
-In MLS, when a member accepts a welcome, it doesn't automatically synchronize with
-the creator's state - there needs to be some evolution event or synchronization.
-
-REFERENCE CODE ANALYSIS:
-Looking at prompts/mls_sqlite.rs test, the working flow is:
-1. Alice creates group
-2. Alice sends message BEFORE Bob accepts welcome
-3. Bob accepts welcome 
-4. Bob can decrypt Alice's message
-
-This suggests the timing matters - Alice must encrypt the message BEFORE Bob's
-state changes from accepting the welcome.
-
-NEXT STEPS TO INVESTIGATE:
-1. Test if creating message immediately after group creation (before Bob joins) works
-2. Check if there are evolution events Bob should publish when accepting welcome
-3. Verify if Alice needs to process some synchronization event after Bob joins
-4. Compare exporter secrets between Alice and Bob at epoch 1
-*/
-
-/*
-MLS EPOCH SYNCHRONIZATION ANALYSIS - CRITICAL FINDING
-=====================================================
-
-BREAKTHROUGH DISCOVERY:
-The working test (mls_sqlite.rs) uses the SAME NostrMls instance for:
-1. Group creation 
-2. Message creation
-
-Our CLI creates SEPARATE NostrMls instances for each command:
-1. create-group: Creates NostrMls instance A → creates group → saves to SQLite → terminates
-2. send-message: Creates NostrMls instance B → loads group from SQLite → creates message
-
-HYPOTHESIS:
-The group state loaded from SQLite (instance B) might be different from the group state
-that was saved to SQLite (instance A) after group creation and merge_pending_commit().
-
-This could explain why:
-- Both Alice and Bob think they're at epoch 1
-- Bob has exporter secrets for epochs 0-1
-- But Alice's message (encrypted with reloaded state) can't be decrypted by Bob
-
-ROOT CAUSE THEORY:
-When Alice's group creation does merge_pending_commit(), the final group state might not be
-properly persisted to SQLite, or the state loading might not recreate the exact same
-cryptographic context needed for message encryption/decryption.
-
-NEXT TEST:
-Create a version that reuses the same NostrMls instance throughout the CLI operation
-to see if this fixes the issue.
-*/
-
-/*
-MLS EPOCH SYNCHRONIZATION ANALYSIS - FINAL STATE
-================================================
-
-ISSUE SUMMARY:
-Bob cannot decrypt Alice's messages despite both being at epoch 1. 
-Error: "Failed to decrypt message with any exporter secret from epochs 0 to 1"
-
-CRITICAL BUG FOUND AND FIXED:
-✅ FIXED: Admin parameter bug - We were passing members list to admins parameter
-   - Working test: create_group(creator, key_packages, [alice, bob], config)  
-   - Our CLI (before): create_group(creator, key_packages, [alice, bob], config) ← members as admins!
-   - Our CLI (after): create_group(creator, key_packages, [alice, bob], config) ← proper admins
-
-HYPOTHESES TESTED AND RULED OUT:
-❌ Timing of Bob's join vs Alice's message sending
-❌ Separate CLI processes causing state inconsistency  
-❌ SQLite persistence/restoration issues
-❌ NostrMls instance recreation between commands
-❌ Network synchronization timing
-❌ Missing merge_pending_commit calls
-❌ Admin parameter mismatch (fixed but issue persists)
-
-REMAINING POSSIBILITIES:
-1. There may be additional parameters or configuration differences between
-   the working test and our CLI that we haven't identified yet
-2. The issue might be related to how key packages are generated/processed
-3. There could be subtle differences in the MLS group state that aren't
-   visible through the public API
-4. The working test might have specific conditions that we're not replicating
-
-CURRENT STATE:
-- Both Alice and Bob report being at epoch 1
-- Bob has exporter secrets for epochs 0-1  
-- Alice's message cannot be decrypted with Bob's secrets
-- Both same-process and separate-process approaches fail identically
-- Admin parameter is now correctly set
-
-This suggests a fundamental incompatibility in how the group states are
-generated between Alice and Bob that we haven't yet identified.
-*/
 
 /// Generate a new identity and return the keys, NostrMls instance, and temp directory
 /// We use a different temp directory for each identity because OpenMLS doesn't have a concept of partitioning storage for different identities.
@@ -148,6 +24,15 @@ fn generate_identity_with_key(
     fs::create_dir_all(&identity_dir)?;
     let db_path = identity_dir.join("mls.db");
     let nostr_mls = NostrMls::new(NostrMlsSqliteStorage::new(db_path).unwrap());
+    Ok((keys, nostr_mls))
+}
+
+/// Generate a new identity with memory storage
+fn generate_identity_with_memory(
+    sk_hex: &str,
+) -> Result<(Keys, NostrMls<NostrMlsMemoryStorage>), Box<dyn std::error::Error>> {
+    let keys = Keys::parse(sk_hex)?;
+    let nostr_mls = NostrMls::new(NostrMlsMemoryStorage::default());
     Ok((keys, nostr_mls))
 }
 
@@ -245,6 +130,9 @@ enum DialogError {
     #[error("Tracing error: {0}")]
     Tracing(#[from] tracing::subscriber::SetGlobalDefaultError),
 
+    #[error("Key error: {0}")]
+    Key(#[from] nostr_sdk::key::Error),
+
     #[error("General error: {0}")]
     General(#[from] Box<dyn std::error::Error>),
 }
@@ -272,6 +160,12 @@ async fn main() -> Result<(), DialogError> {
                         .value_name("KEY")
                         .help("Secret key for identity: 'bob', 'alice', or hex string")
                         .required(true),
+                )
+                .arg(
+                    Arg::new("memory-storage")
+                        .long("memory-storage")
+                        .help("Use memory storage instead of SQLite (for testing)")
+                        .action(clap::ArgAction::SetTrue),
                 ),
         )
         .subcommand(
@@ -412,38 +306,73 @@ async fn main() -> Result<(), DialogError> {
         Some(("publish-key", sub_matches)) => {
             let key_arg = sub_matches.get_one::<String>("key").unwrap();
             let sk_hex = get_secret_key(key_arg)?;
-            let (keys, nostr_mls) = generate_identity_with_key(&sk_hex)?;
-            println!("Using provided key: {}", key_arg);
-
+            let use_memory = sub_matches.get_flag("memory-storage");
+            
             let relay_url = RelayUrl::parse("ws://localhost:8080").unwrap();
 
-            let (key_package_encoded, tags) =
-                nostr_mls.create_key_package_for_event(&keys.public_key(), [relay_url.clone()])?;
+            if use_memory {
+                println!("Using memory storage for: {}", key_arg);
+                let (keys, nostr_mls) = generate_identity_with_memory(&sk_hex)?;
+                
+                let (key_package_encoded, tags) =
+                    nostr_mls.create_key_package_for_event(&keys.public_key(), [relay_url.clone()])?;
 
-            let key_package_event = EventBuilder::new(Kind::MlsKeyPackage, key_package_encoded)
-                .tags(tags)
-                .sign_with_keys(&keys)
-                .map_err(|e| DialogError::General(Box::new(e)))?;
-            println!("Key package event: {:?}", key_package_event);
+                let key_package_event = EventBuilder::new(Kind::MlsKeyPackage, key_package_encoded)
+                    .tags(tags)
+                    .sign_with_keys(&keys)
+                    .map_err(|e| DialogError::General(Box::new(e)))?;
+                println!("Key package event: {:?}", key_package_event);
 
-            let client = Client::new(keys.clone());
-            client
-                .add_relay(relay_url.to_string())
-                .await
-                .map_err(|e| DialogError::General(Box::new(e)))?;
-            client.connect().await;
+                let client = Client::new(keys.clone());
+                client
+                    .add_relay(relay_url.to_string())
+                    .await
+                    .map_err(|e| DialogError::General(Box::new(e)))?;
+                client.connect().await;
 
-            println!("Publishing key package event...");
-            let output = client
-                .send_event(&key_package_event)
-                .await
-                .map_err(|e| DialogError::General(Box::new(e)))?;
-            println!(
-                "Event ID: {}",
-                output.id().to_bech32().map_err(|e| DialogError::General(Box::new(e)))?
-            );
-            println!("Sent to: {:?}", output.success);
-            println!("Not sent to: {:?}", output.failed);
+                println!("Publishing key package event...");
+                let output = client
+                    .send_event(&key_package_event)
+                    .await
+                    .map_err(|e| DialogError::General(Box::new(e)))?;
+                println!(
+                    "Event ID: {}",
+                    output.id().to_bech32().map_err(|e| DialogError::General(Box::new(e)))?
+                );
+                println!("Sent to: {:?}", output.success);
+                println!("Not sent to: {:?}", output.failed);
+            } else {
+                println!("Using SQLite storage for: {}", key_arg);
+                let (keys, nostr_mls) = generate_identity_with_key(&sk_hex)?;
+                
+                let (key_package_encoded, tags) =
+                    nostr_mls.create_key_package_for_event(&keys.public_key(), [relay_url.clone()])?;
+
+                let key_package_event = EventBuilder::new(Kind::MlsKeyPackage, key_package_encoded)
+                    .tags(tags)
+                    .sign_with_keys(&keys)
+                    .map_err(|e| DialogError::General(Box::new(e)))?;
+                println!("Key package event: {:?}", key_package_event);
+
+                let client = Client::new(keys.clone());
+                client
+                    .add_relay(relay_url.to_string())
+                    .await
+                    .map_err(|e| DialogError::General(Box::new(e)))?;
+                client.connect().await;
+
+                println!("Publishing key package event...");
+                let output = client
+                    .send_event(&key_package_event)
+                    .await
+                    .map_err(|e| DialogError::General(Box::new(e)))?;
+                println!(
+                    "Event ID: {}",
+                    output.id().to_bech32().map_err(|e| DialogError::General(Box::new(e)))?
+                );
+                println!("Sent to: {:?}", output.success);
+                println!("Not sent to: {:?}", output.failed);
+            }
         }
         Some(("create-group", sub_matches)) => {
             let key_arg = sub_matches.get_one::<String>("key").unwrap();
