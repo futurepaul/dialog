@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    "dialog_cli",
+    "dialog_cli", "dialog_tui",
 ]
 resolver = "2"
 
