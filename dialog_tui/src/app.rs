@@ -1,4 +1,7 @@
 use std::time::Duration;
+use std::panic;
+use std::fs::OpenOptions;
+use std::io::Write;
 use crossterm::{
     event::{self, Event},
     execute,
@@ -28,6 +31,7 @@ pub struct App {
     storage: PerPubkeyStorage,
     keys: Option<Keys>,
     client: Option<Client>,
+    log_file: Option<std::fs::File>,
 }
 
 impl App {
@@ -58,6 +62,21 @@ impl App {
 
         // Initialize storage
         let storage = PerPubkeyStorage::new()?;
+        
+        // Initialize log file
+        let log_file = match OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("dialog_tui_debug.log") {
+            Ok(file) => {
+                println!("Debug logs will be written to: dialog_tui_debug.log");
+                Some(file)
+            }
+            Err(e) => {
+                eprintln!("Warning: Could not create log file: {}", e);
+                None
+            }
+        };
 
         Ok(Self {
             state: AppState::default(),
@@ -67,6 +86,7 @@ impl App {
             storage,
             keys: None,
             client: None,
+            log_file,
         })
     }
 
@@ -79,6 +99,9 @@ impl App {
         
         // Initialize storage for this pubkey
         self.storage.init_for_pubkey(&keys).await?;
+        
+        // Log session start
+        self.add_log_entry("INFO", &format!("=== NEW SESSION STARTED === Key: {}", keys.public_key()));
         
         // Load existing conversations and contacts
         let conversations = self.storage.load_conversations().await?;
@@ -173,6 +196,10 @@ impl App {
                 if tx.send(Msg::Tick).is_err() {
                     break;
                 }
+                // Also send toast expiration check
+                if tx.send(Msg::ExpireToasts).is_err() {
+                    break;
+                }
             }
         });
     }
@@ -215,19 +242,49 @@ impl App {
                 Ok(())
             }
             Cmd::SendMessage(content, conversation_id) => {
+                tracing::info!("SendMessage command initiated for conversation: {}", conversation_id);
+                self.add_log_entry("INFO", &format!("Attempting to send message to conversation: {}", conversation_id));
+                
                 if let (Some(client), Some(keys)) = (&self.client, &self.keys) {
-                    if let Some(conversation) = self.state.conversations.get(&conversation_id) {
+                    tracing::debug!("Client and keys available for sending message");
+                    
+                    // Extract conversation details before borrowing storage mutably
+                    let (conversation_name, group_id) = if let Some(conversation) = self.state.conversations.get(&conversation_id) {
+                        tracing::debug!("Found conversation: {}", conversation.name);
+                        
                         if let Some(group_id) = &conversation.group_id {
-                            if let Some(nostr_mls) = self.storage.get_nostr_mls_mut() {
-                                tracing::info!("Sending message to group: {}", conversation_id);
+                            tracing::debug!("Conversation has group_id: {}", hex::encode(group_id.as_slice()));
+                            (conversation.name.clone(), Some(group_id.clone()))
+                        } else {
+                            (conversation.name.clone(), None)
+                        }
+                    } else {
+                        (String::new(), None)
+                    };
+                    
+                    if conversation_name.is_empty() {
+                        let error_msg = format!("Conversation not found: {}", conversation_id);
+                        tracing::error!("{}", error_msg);
+                        self.add_log_entry("ERROR", &error_msg);
+                    } else if let Some(group_id) = group_id {
+                        if let Some(nostr_mls) = self.storage.get_nostr_mls_mut() {
+                            tracing::info!("Sending message to group: {}", conversation_id);
+                            let mut log_messages = Vec::new(); // Collect log messages to add later
                                 
                                 // First, sync the group state by fetching any pending messages
                                 let groups = nostr_mls.get_groups()
                                     .map_err(|e| DialogTuiError::Network { 
                                         message: format!("Failed to get groups: {}", e) 
                                     })?;
+                                    
+                                log_messages.push(("DEBUG".to_string(), format!("Found {} total MLS groups in storage", groups.len())));
+                                for (i, group) in groups.iter().enumerate() {
+                                    log_messages.push(("DEBUG".to_string(), format!("Group {}: id={}, epoch={}", i, hex::encode(group.mls_group_id.as_slice()), group.epoch)));
+                                }
                                 
-                                if let Some(stored_group) = groups.iter().find(|g| &g.mls_group_id == group_id) {
+                                if let Some(stored_group) = groups.iter().find(|g| g.mls_group_id == group_id) {
+                                    tracing::debug!("Found stored group at epoch: {}", stored_group.epoch);
+                                    log_messages.push(("DEBUG".to_string(), format!("Found stored group at epoch: {}", stored_group.epoch)));
                                     let nostr_group_id_hex = hex::encode(&stored_group.nostr_group_id);
                                     
                                     // Fetch and process any pending MLS events
@@ -255,11 +312,77 @@ impl App {
                                         .build(keys.public_key());
                                     
                                     // Create MLS message
-                                    let message_event = nostr_mls
-                                        .create_message(group_id, rumor)
+                                    tracing::debug!("Creating MLS message for group_id: {}", hex::encode(group_id.as_slice()));
+                                    log_messages.push(("DEBUG".to_string(), format!("Creating MLS message for group_id: {}", hex::encode(group_id.as_slice()))));
+                                    
+                                    // DEEP DEBUG: Let's verify the group state before attempting to create message
+                                    let groups_before_create = nostr_mls.get_groups()
                                         .map_err(|e| DialogTuiError::Network { 
-                                            message: format!("Failed to create MLS message: {}", e) 
+                                            message: format!("Failed to get groups before create_message: {}", e) 
                                         })?;
+                                    log_messages.push(("DEBUG".to_string(), format!("Groups available before create_message: {}", groups_before_create.len())));
+                                    
+                                    let target_group = groups_before_create.iter().find(|g| g.mls_group_id == group_id);
+                                    if let Some(group) = target_group {
+                                        log_messages.push(("DEBUG".to_string(), format!("Target group found - epoch: {}", group.epoch)));
+                                        log_messages.push(("ERROR".to_string(), "CRITICAL BUG: MLS library has group metadata but create_message fails!".to_string()));
+                                        log_messages.push(("ERROR".to_string(), "This indicates the group's cryptographic state is corrupted or missing".to_string()));
+                                        log_messages.push(("ERROR".to_string(), "Possible solutions: 1) Re-fetch welcome message 2) Re-join group 3) Delete corrupted group".to_string()));
+                                        log_messages.push(("ERROR".to_string(), "WORKAROUND: Use Power Tools > Reset All State to clear corrupted groups".to_string()));
+                                        
+                                        // Try to get more detailed group information if available
+                                        log_messages.push(("DEBUG".to_string(), format!("Group details - name: {:?}, description: {:?}", group.name, group.description)));
+                                        
+                                        // For now, we'll continue to attempt create_message to get the exact error
+                                    } else {
+                                        log_messages.push(("ERROR".to_string(), "Target group NOT FOUND in get_groups() right before create_message!".to_string()));
+                                        // Add log entry after dropping mutable borrow
+                                        for (level, msg) in log_messages {
+                                            self.add_log_entry(&level, &msg);
+                                        }
+                                        self.add_log_entry("ERROR", "CRITICAL: Group exists in conversation storage but not in MLS storage!");
+                                        return Err(DialogTuiError::Network { 
+                                            message: "Group storage inconsistency detected".to_string() 
+                                        });
+                                    }
+                                    
+                                    // Wrap in panic protection
+                                    let message_result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+                                        nostr_mls.create_message(&group_id, rumor.clone())
+                                    }));
+                                    
+                                    let message_event = match message_result {
+                                        Ok(Ok(event)) => {
+                                            log_messages.push(("INFO".to_string(), "Successfully created MLS message".to_string()));
+                                            event
+                                        }
+                                        Ok(Err(e)) => {
+                                            let error_msg = format!("Failed to create MLS message: {}", e);
+                                            tracing::error!("{}", error_msg);
+                                            // Add log entry after dropping mutable borrow
+                                            for (level, msg) in log_messages {
+                                                self.add_log_entry(&level, &msg);
+                                            }
+                                            self.add_log_entry("ERROR", &error_msg);
+                                            return Err(DialogTuiError::Network { message: error_msg });
+                                        }
+                                        Err(panic_info) => {
+                                            let error_msg = if let Some(s) = panic_info.downcast_ref::<String>() {
+                                                format!("MLS create_message panicked: {}", s)
+                                            } else if let Some(s) = panic_info.downcast_ref::<&str>() {
+                                                format!("MLS create_message panicked: {}", s)
+                                            } else {
+                                                "MLS create_message panicked with unknown error".to_string()
+                                            };
+                                            tracing::error!("{}", error_msg);
+                                            // Add log entry after dropping mutable borrow
+                                            for (level, msg) in log_messages {
+                                                self.add_log_entry(&level, &msg);
+                                            }
+                                            self.add_log_entry("ERROR", &error_msg);
+                                            return Err(DialogTuiError::Network { message: error_msg });
+                                        }
+                                    };
                                     
                                     // Send the message
                                     let output = client.send_event(&message_event).await
@@ -270,15 +393,23 @@ impl App {
                                     tracing::info!("Sent message: {}", output.id());
                                     
                                     // Process the message locally to maintain MLS state
+                                    let message_id = output.id().to_string();
+                                    let sender_pubkey = keys.public_key();
+                                    
                                     if let Err(e) = nostr_mls.process_message(&message_event) {
-                                        tracing::error!("Failed to process own message: {}", e);
+                                        tracing::error!("Failed to process own message locally: {}", e);
+                                        // Store error for later logging
+                                        let error_msg = format!("Failed to process own message locally: {}", e);
+                                        self.add_log_entry("ERROR", &error_msg);
+                                    } else {
+                                        tracing::debug!("Successfully processed own message locally");
                                     }
                                     
                                     // Add to local state immediately for UI feedback
                                     let chat_message = crate::model::ChatMessage {
-                                        id: output.id().to_string(),
+                                        id: message_id.clone(),
                                         conversation_id: conversation_id.clone(),
-                                        sender: keys.public_key(),
+                                        sender: sender_pubkey,
                                         content,
                                         timestamp: chrono::Utc::now(),
                                         is_own: true,
@@ -291,10 +422,61 @@ impl App {
                                     
                                     // Save to storage
                                     self.storage.save_message(&chat_message).await?;
+                                    
+                                    // Mark the message as processed
+                                    self.state.processed_message_ids.insert(message_id);
+                                    
+                                    log_messages.push(("INFO".to_string(), format!("Successfully sent message to {}", conversation_name)));
+                                } else {
+                                    let error_msg = format!("Group not found in MLS storage for conversation: {}. Found {} total groups but none match group_id: {}", 
+                                        conversation_id, groups.len(), hex::encode(group_id.as_slice()));
+                                    tracing::error!("{}", error_msg);
+                                    log_messages.push(("ERROR".to_string(), error_msg.clone()));
+                                    
+                                    // Try to recover by re-fetching welcome messages
+                                    log_messages.push(("INFO".to_string(), "Attempting to recover by re-fetching welcome messages...".to_string()));
+                                    
+                                    // client and keys are already available from the outer scope
+                                    let filter = Filter::new()
+                                        .kind(Kind::GiftWrap)
+                                        .pubkey(keys.public_key());
+                                    
+                                    if let Ok(events) = client.fetch_events(filter, Duration::from_secs(5)).await {
+                                        log_messages.push(("DEBUG".to_string(), format!("Found {} gift wrap events during recovery", events.len())));
+                                        
+                                        for event in events {
+                                            if let Ok(unwrapped_gift) = nip59::extract_rumor(keys, &event).await {
+                                                if unwrapped_gift.rumor.kind == Kind::MlsWelcome {
+                                                    log_messages.push(("DEBUG".to_string(), format!("Processing welcome message during recovery: {}", event.id)));
+                                                    if let Err(e) = nostr_mls.process_welcome(&event.id, &unwrapped_gift.rumor) {
+                                                        log_messages.push(("WARN".to_string(), format!("Failed to process welcome during recovery: {}", e)));
+                                                    } else {
+                                                        log_messages.push(("INFO".to_string(), "Successfully processed welcome message during recovery".to_string()));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
+                            
+                            // Add all collected log messages after dropping the mutable borrow
+                            for (level, msg) in log_messages {
+                                self.add_log_entry(&level, &msg);
                             }
+                        } else {
+                            let error_msg = "NostrMLS not initialized";
+                            tracing::error!("{}", error_msg);
+                            self.add_log_entry("ERROR", error_msg);
                         }
+                    } else {
+                        let error_msg = format!("Conversation {} has no group_id (not an MLS conversation)", conversation_id);
+                        tracing::error!("{}", error_msg);
+                        self.add_log_entry("ERROR", &error_msg);
                     }
+                } else {
+                    let error_msg = "Client or keys not available for sending message";
+                    tracing::error!("{}", error_msg);
+                    self.add_log_entry("ERROR", error_msg);
                 }
                 Ok(())
             }
@@ -304,6 +486,7 @@ impl App {
             }
             Cmd::CreateMlsGroup(contact_id) => {
                 tracing::info!("Starting CreateMlsGroup command for contact_id: {}", contact_id);
+                self.add_log_entry("INFO", &format!("Starting CreateMlsGroup command for contact_id: {}", contact_id));
                 if let Some(contact) = self.state.contacts.get(&contact_id) {
                     tracing::info!("Found contact: {}", contact.petname);
                     if let (Some(client), Some(keys)) = (&self.client, &self.keys) {
@@ -414,14 +597,16 @@ impl App {
                             }
                         } else {
                             tracing::warn!("No key package found for contact: {}. They need to publish a keypackage first.", contact.petname);
-                            // TODO: Show error message to user
+                            self.add_log_entry("WARN", &format!("No key package found for contact: {}. They need to publish a keypackage first.", contact.petname));
                         }
                     } else {
                         tracing::error!("Client or keys not available - client: {}, keys: {}", 
                             self.client.is_some(), self.keys.is_some());
+                        self.add_log_entry("ERROR", "Client or keys not available");
                     }
                 } else {
                     tracing::error!("Contact not found for contact_id: {}", contact_id);
+                    self.add_log_entry("ERROR", &format!("Contact not found for contact_id: {}", contact_id));
                 }
                 Ok(())
             }
@@ -551,45 +736,206 @@ impl App {
                         
                         if let Some(event) = events.first() {
                             if let Ok(unwrapped_gift) = nip59::extract_rumor(keys, event).await {
+                                // Store values we need after mutable borrow
+                                let invite_petname = invite.petname.clone();
+                                let invite_from = invite.from;
+                                
+                                // Collect messages to save outside the mutable borrow
+                                let mut messages_to_save = Vec::new();
+                                let mut conversation_created = false;
+                                let mut log_messages = Vec::new();
+                                
                                 if let Some(nostr_mls) = self.storage.get_nostr_mls_mut() {
                                     // Process the welcome message
                                     match nostr_mls.process_welcome(&event.id, &unwrapped_gift.rumor) {
                                         Ok(_) => {
-                                            tracing::info!("Successfully processed welcome from {}", invite.petname);
+                                            tracing::info!("Successfully processed welcome from {}", invite_petname);
+                                            log_messages.push(("INFO".to_string(), format!("Processed welcome message from {}", invite_petname)));
                                             
-                                            // Get the groups to find the newly joined group
-                                            if let Ok(groups) = nostr_mls.get_groups() {
-                                                // Find the most recently added group (this is a simplification)
+                                            // Get the groups and create conversation data
+                                            let conversation_data = if let Ok(groups) = nostr_mls.get_groups() {
                                                 if let Some(latest_group) = groups.last() {
                                                     let conversation_id = hex::encode(latest_group.mls_group_id.as_slice());
-                                                    let conversation = crate::model::state::Conversation {
-                                                        id: conversation_id.clone(),
-                                                        group_id: Some(latest_group.mls_group_id.clone()),
-                                                        name: invite.petname.clone(),
-                                                        participants: vec![invite.from],
-                                                        last_message_time: None,
-                                                        unread_count: 0,
-                                                    };
+                                                    tracing::info!("Joined group at epoch: {}", latest_group.epoch);
+                                                    log_messages.push(("DEBUG".to_string(), format!("New group created: id={}, epoch={}", conversation_id, latest_group.epoch)));
                                                     
-                                                    // Save and add to state
-                                                    self.storage.save_conversation(&conversation).await?;
-                                                    self.state.conversations.insert(conversation_id.clone(), conversation);
+                                                    // CRITICAL: Test if the new group can actually create messages
+                                                    let test_rumor = EventBuilder::new(Kind::TextNote, "test".to_string())
+                                                        .build(keys.public_key());
                                                     
-                                                    tracing::info!("Created conversation for accepted invite: {}", conversation_id);
+                                                    match nostr_mls.create_message(&latest_group.mls_group_id, test_rumor) {
+                                                        Ok(_) => {
+                                                            log_messages.push(("INFO".to_string(), "✅ Group validation PASSED - can create messages".to_string()));
+                                                            tracing::info!("Group validation passed - group is functional");
+                                                        }
+                                                        Err(e) => {
+                                                            log_messages.push(("ERROR".to_string(), format!("❌ Group validation FAILED: {}", e)));
+                                                            log_messages.push(("ERROR".to_string(), "The welcome message created a broken group!".to_string()));
+                                                            tracing::error!("Group validation failed immediately after welcome: {}", e);
+                                                            // Add collected log messages before returning error
+                                                            for (level, msg) in log_messages {
+                                                                self.add_log_entry(&level, &msg);
+                                                            }
+                                                            // Don't create conversation for broken group
+                                                            return Err(DialogTuiError::Network { 
+                                                                message: format!("Invite acceptance created broken group: {}", e) 
+                                                            });
+                                                        }
+                                                    }
+                                                    
+                                                    Some((
+                                                        conversation_id.clone(),
+                                                        latest_group.mls_group_id.clone(),
+                                                        hex::encode(&latest_group.nostr_group_id),
+                                                        conversation_id,
+                                                    ))
+                                                } else {
+                                                    tracing::warn!("No groups found after processing welcome");
+                                                    log_messages.push(("WARN".to_string(), "No groups found after processing welcome".to_string()));
+                                                    None
+                                                }
+                                            } else {
+                                                tracing::error!("Failed to get groups after processing welcome");
+                                                log_messages.push(("ERROR".to_string(), "Failed to get groups after processing welcome".to_string()));
+                                                None
+                                            };
+                                            
+                                            // Process existing messages for the group
+                                            if let Some((conversation_id, _group_id, nostr_group_id_hex, _)) = &conversation_data {
+                                                tracing::info!("Fetching existing messages for newly joined group...");
+                                                
+                                                let filter = Filter::new()
+                                                    .kind(Kind::MlsGroupMessage)
+                                                    .custom_tag(
+                                                        nostr_sdk::SingleLetterTag::lowercase(nostr_sdk::Alphabet::H), 
+                                                        nostr_group_id_hex.clone()
+                                                    );
+                                                
+                                                if let Ok(existing_events) = client.fetch_events(filter, Duration::from_secs(10)).await {
+                                                    tracing::info!("Found {} existing MLS messages for group", existing_events.len());
+                                                    
+                                                    let mut new_messages: Vec<(crate::model::ChatMessage, String)> = Vec::new();
+                                                    
+                                                    for existing_event in existing_events {
+                                                        let event_id = existing_event.id.to_string();
+                                                        
+                                                        // Skip if already processed
+                                                        if self.state.processed_message_ids.contains(&event_id) {
+                                                            continue;
+                                                        }
+                                                        
+                                                        // Mark as processed
+                                                        self.state.processed_message_ids.insert(event_id.clone());
+                                                        
+                                                        // Try to process the message
+                                                        match nostr_mls.process_message(&existing_event) {
+                                                            Ok(nostr_mls::messages::MessageProcessingResult::ApplicationMessage(message)) => {
+                                                                tracing::info!("Decrypted existing message: {}", message.content);
+                                                                
+                                                                let chat_message = crate::model::ChatMessage {
+                                                                    id: event_id,
+                                                                    conversation_id: conversation_id.clone(),
+                                                                    sender: message.pubkey,
+                                                                    content: message.content,
+                                                                    timestamp: chrono::DateTime::from_timestamp(existing_event.created_at.as_u64() as i64, 0)
+                                                                        .unwrap_or_else(|| chrono::Utc::now()),
+                                                                    is_own: message.pubkey == keys.public_key(),
+                                                                };
+                                                                
+                                                                messages_to_save.push(chat_message);
+                                                            }
+                                                            Ok(_) => {
+                                                                tracing::debug!("Processed non-application MLS message: {}", event_id);
+                                                            }
+                                                            Err(e) => {
+                                                                tracing::warn!("Failed to process existing MLS message {}: {}", event_id, e);
+                                                            }
+                                                        }
+                                                    }
+                                                    
                                                 }
                                             }
                                             
-                                            // Remove from pending invites
-                                            self.state.pending_invites.remove(invite_index);
+                                            // Mark that we successfully processed the invite
+                                            conversation_created = true;
                                         }
                                         Err(e) => {
-                                            tracing::error!("Failed to process welcome: {}", e);
+                                            let error_msg = format!("Failed to process welcome from {}: {}", invite_petname, e);
+                                            tracing::error!("{}", error_msg);
                                         }
                                     }
+                                } // End of mutable borrow scope
+                                
+                                // Add any collected log messages
+                                for (level, msg) in log_messages {
+                                    self.add_log_entry(&level, &msg);
                                 }
+                                
+                                // Now handle all the operations that require storage access
+                                if conversation_created {
+                                    // Add messages to state
+                                    for chat_message in &messages_to_save {
+                                        self.state.messages
+                                            .entry(chat_message.conversation_id.clone())
+                                            .or_insert_with(Vec::new)
+                                            .push(chat_message.clone());
+                                    }
+                                    
+                                    // Save messages to storage
+                                    for chat_message in messages_to_save {
+                                        let _ = self.storage.save_message(&chat_message).await;
+                                    }
+                                    
+                                    // Create and save conversation
+                                    if let Some(nostr_mls) = self.storage.get_nostr_mls() {
+                                        if let Ok(groups) = nostr_mls.get_groups() {
+                                            if let Some(latest_group) = groups.last() {
+                                                let conversation_id = hex::encode(latest_group.mls_group_id.as_slice());
+                                                let conversation = crate::model::state::Conversation {
+                                                    id: conversation_id.clone(),
+                                                    group_id: Some(latest_group.mls_group_id.clone()),
+                                                    name: invite_petname.clone(),
+                                                    participants: vec![invite_from],
+                                                    last_message_time: None,
+                                                    unread_count: 0,
+                                                };
+                                                
+                                                // Save and add to state
+                                                self.storage.save_conversation(&conversation).await?;
+                                                self.state.conversations.insert(conversation_id.clone(), conversation);
+                                                
+                                                tracing::info!("Created conversation for accepted invite: {}", conversation_id);
+                                                self.add_log_entry("INFO", &format!("Successfully joined group invited by {}", invite_petname));
+                                            }
+                                        }
+                                    }
+                                    
+                                    // Remove from pending invites
+                                    self.state.pending_invites.remove(invite_index);
+                                } else {
+                                    let error_msg = "NostrMLS not initialized for accepting invite";
+                                    tracing::error!("{}", error_msg);
+                                    self.add_log_entry("ERROR", error_msg);
+                                }
+                            } else {
+                                let error_msg = format!("Failed to decrypt gift wrap for invite from {}", invite.petname);
+                                tracing::error!("{}", error_msg);
+                                self.add_log_entry("ERROR", &error_msg);
                             }
+                        } else {
+                            let error_msg = format!("Failed to fetch invite event: {}", invite.event_id);
+                            tracing::error!("{}", error_msg);
+                            self.add_log_entry("ERROR", &error_msg);
                         }
+                    } else {
+                        let error_msg = format!("Invalid invite index: {}", invite_index);
+                        tracing::error!("{}", error_msg);
+                        self.add_log_entry("ERROR", &error_msg);
                     }
+                } else {
+                    let error_msg = "Client or keys not available for accepting invite";
+                    tracing::error!("{}", error_msg);
+                    self.add_log_entry("ERROR", error_msg);
                 }
                 Ok(())
             }
@@ -622,10 +968,21 @@ impl App {
                             })?;
                         
                         for event in events {
-                            // Check if we've already processed this message
+                            let event_id = event.id.to_string();
+                            
+                            // Check if we've already processed this message (either successfully or unsuccessfully)
+                            if self.state.processed_message_ids.contains(&event_id) {
+                                tracing::debug!("Skipping already processed message: {}", event_id);
+                                continue;
+                            }
+                            
+                            // Mark as processed to prevent future reprocessing
+                            self.state.processed_message_ids.insert(event_id.clone());
+                            
+                            // Also check if it already exists in our messages
                             let message_exists = self.state.messages
                                 .get(&conversation_id)
-                                .map(|msgs| msgs.iter().any(|m| m.id == event.id.to_string()))
+                                .map(|msgs| msgs.iter().any(|m| m.id == event_id))
                                 .unwrap_or(false);
                             
                             if !message_exists {
@@ -658,7 +1015,7 @@ impl App {
                                             tracing::debug!("Processed MLS external join proposal: {}", event.id);
                                         }
                                         Ok(MessageProcessingResult::Unprocessable) => {
-                                            tracing::debug!("Unprocessable MLS message: {}", event.id);
+                                            tracing::debug!("Unprocessable MLS message (likely own message or already processed): {}", event.id);
                                         }
                                         Err(e) => {
                                             tracing::warn!("Failed to process MLS message {}: {}", event.id, e);
@@ -775,9 +1132,20 @@ impl App {
             message: message.to_string(),
         };
         
+        // Write to file first (persistent logging)
+        if let Some(ref mut file) = self.log_file {
+            let log_line = format!("{} [{}] {}\n", 
+                entry.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"), 
+                entry.level, 
+                entry.message
+            );
+            let _ = file.write_all(log_line.as_bytes());
+            let _ = file.flush(); // Ensure it's written immediately
+        }
+        
         self.state.debug_logs.push(entry.clone());
         
-        // Keep only the last 1000 log entries
+        // Keep only the last 1000 log entries in memory
         if self.state.debug_logs.len() > 1000 {
             self.state.debug_logs.drain(0..self.state.debug_logs.len() - 1000);
         }
@@ -789,6 +1157,33 @@ impl App {
             "INFO" => tracing::info!("{}", message),
             "DEBUG" => tracing::debug!("{}", message),
             _ => tracing::trace!("{}", message),
+        }
+        
+        // Add toast notifications for warnings and errors
+        if level == "WARN" || level == "ERROR" {
+            self.add_toast_notification(level, message);
+        }
+    }
+    
+    fn add_toast_notification(&mut self, level: &str, message: &str) {
+        let duration = match level {
+            "ERROR" => 8, // Show errors for 8 seconds
+            "WARN" => 5,  // Show warnings for 5 seconds  
+            _ => 3,       // Other notifications for 3 seconds
+        };
+        
+        let toast = crate::model::ToastNotification {
+            message: message.to_string(),
+            level: level.to_string(),
+            timestamp: chrono::Utc::now(),
+            duration_secs: duration,
+        };
+        
+        self.state.toast_notifications.push(toast);
+        
+        // Keep only the last 5 toast notifications
+        if self.state.toast_notifications.len() > 5 {
+            self.state.toast_notifications.drain(0..self.state.toast_notifications.len() - 5);
         }
     }
 }

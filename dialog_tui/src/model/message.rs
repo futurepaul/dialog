@@ -72,6 +72,7 @@ pub enum Msg {
     // System Events
     Tick,
     FetchNewMessages,
+    ExpireToasts,
     Quit,
 }
 

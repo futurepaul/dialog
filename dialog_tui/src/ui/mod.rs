@@ -45,6 +45,9 @@ pub fn render(state: &AppState, frame: &mut Frame) {
     render_contacts(state, frame, sidebar_chunks[0]);
     render_conversations(state, frame, sidebar_chunks[1]);
     render_chat_area(state, frame, chunks[1]);
+    
+    // Render toast notifications on top
+    render_toast_notifications(state, frame);
 }
 
 fn render_contacts(state: &AppState, frame: &mut Frame, area: Rect) {
@@ -661,4 +664,81 @@ fn render_debug_log(state: &AppState, frame: &mut Frame) {
         .style(Style::default().fg(Color::DarkGray))
         .block(Block::default().borders(Borders::ALL));
     frame.render_widget(footer, chunks[2]);
+}
+
+fn render_toast_notifications(state: &AppState, frame: &mut Frame) {
+    let area = frame.area();
+    
+    // Only show if there are active toasts
+    if state.toast_notifications.is_empty() {
+        return;
+    }
+    
+    // Position toasts in top-right corner
+    let toast_width = 50.min(area.width - 2);
+    let toast_x = area.width.saturating_sub(toast_width + 1);
+    let mut toast_y = 1;
+    
+    // Render each toast (up to 3 visible at once)
+    for toast in state.toast_notifications.iter().rev().take(3) {
+        // Calculate required height for the text
+        let text_content = toast.message.as_str();
+        let content_width = toast_width.saturating_sub(2); // Account for borders
+        
+        // Calculate number of lines needed (simple word wrapping calculation)
+        let lines_needed = if text_content.is_empty() {
+            1
+        } else {
+            let mut lines = 0;
+            let mut current_line_length = 0;
+            
+            for word in text_content.split_whitespace() {
+                let word_len = word.len();
+                if current_line_length + word_len + 1 > content_width as usize {
+                    lines += 1;
+                    current_line_length = word_len;
+                } else {
+                    if current_line_length > 0 {
+                        current_line_length += 1; // space
+                    }
+                    current_line_length += word_len;
+                }
+            }
+            if current_line_length > 0 {
+                lines += 1;
+            }
+            lines.max(1)
+        };
+        
+        // Calculate toast height: content lines + 2 for borders
+        let toast_height = (lines_needed as u16 + 2).min(8); // Cap at 8 lines max
+        
+        // Check if toast fits on screen
+        if toast_y + toast_height > area.height {
+            break;
+        }
+        
+        let toast_area = Rect::new(toast_x, toast_y, toast_width, toast_height);
+        
+        // Choose color based on level
+        let (bg_color, fg_color) = match toast.level.as_str() {
+            "ERROR" => (Color::Red, Color::White),
+            "WARN" => (Color::Yellow, Color::Black),
+            _ => (Color::Blue, Color::White),
+        };
+        
+        // Create toast widget
+        let toast_widget = Paragraph::new(text_content)
+            .style(Style::default().fg(fg_color).bg(bg_color))
+            .block(Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(bg_color))
+                .title(toast.level.as_str()))
+            .wrap(Wrap { trim: true });
+        
+        frame.render_widget(toast_widget, toast_area);
+        
+        // Move to next position
+        toast_y += toast_height + 1;
+    }
 }

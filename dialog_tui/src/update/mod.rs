@@ -44,6 +44,7 @@ pub fn update(state: &AppState, msg: Msg) -> (AppState, Cmd) {
         Msg::InviteReceived(invite) => handle_invite_received(state, invite),
         Msg::SelectInvite(invite_index) => handle_select_invite(state, invite_index),
         Msg::FetchNewMessages => (state.clone(), Cmd::FetchNewMessages),
+        Msg::ExpireToasts => handle_expire_toasts(state),
         Msg::TogglePowerTools => handle_toggle_power_tools(state),
         Msg::PowerToolsSelect(index) => handle_power_tools_select(state, index),
         Msg::PowerToolsAction => handle_power_tools_action(state),
@@ -185,23 +186,163 @@ fn handle_tab(state: &AppState) -> (AppState, Cmd) {
 }
 
 fn handle_contacts_nav_down(state: &AppState) -> (AppState, Cmd) {
-    // TODO: Navigate down in contacts list
-    (state.clone(), Cmd::None)
+    let mut new_state = state.clone();
+    
+    if state.contacts.is_empty() {
+        return (state.clone(), Cmd::None);
+    }
+    
+    let contact_keys: Vec<_> = state.contacts.keys().cloned().collect();
+    
+    // Find current position
+    let current_pos = if let Some(selected_id) = &state.selected_contact {
+        contact_keys.iter().position(|id| id == selected_id).unwrap_or(0)
+    } else {
+        0
+    };
+    
+    // Calculate next position
+    let next_pos = (current_pos + 1) % contact_keys.len();
+    
+    // Update selection
+    if let Some(contact_id) = contact_keys.get(next_pos) {
+        new_state.selected_contact = Some(contact_id.clone());
+    }
+    
+    (new_state, Cmd::None)
 }
 
 fn handle_contacts_nav_up(state: &AppState) -> (AppState, Cmd) {
-    // TODO: Navigate up in contacts list
-    (state.clone(), Cmd::None)
+    let mut new_state = state.clone();
+    
+    if state.contacts.is_empty() {
+        return (state.clone(), Cmd::None);
+    }
+    
+    let contact_keys: Vec<_> = state.contacts.keys().cloned().collect();
+    
+    // Find current position
+    let current_pos = if let Some(selected_id) = &state.selected_contact {
+        contact_keys.iter().position(|id| id == selected_id).unwrap_or(0)
+    } else {
+        contact_keys.len() - 1
+    };
+    
+    // Calculate previous position
+    let prev_pos = if current_pos == 0 {
+        contact_keys.len() - 1
+    } else {
+        current_pos - 1
+    };
+    
+    // Update selection
+    if let Some(contact_id) = contact_keys.get(prev_pos) {
+        new_state.selected_contact = Some(contact_id.clone());
+    }
+    
+    (new_state, Cmd::None)
 }
 
 fn handle_conversations_nav_down(state: &AppState) -> (AppState, Cmd) {
-    // TODO: Navigate down in conversations list
-    (state.clone(), Cmd::None)
+    let mut new_state = state.clone();
+    
+    let invite_count = state.pending_invites.len();
+    let conv_count = state.conversations.len();
+    let _has_separator = invite_count > 0;
+    let total_items = invite_count + conv_count;
+    
+    if total_items == 0 {
+        return (state.clone(), Cmd::None);
+    }
+    
+    // Determine current position
+    let current_pos = if let Some(invite_idx) = state.selected_invite {
+        invite_idx
+    } else if let Some(conv_id) = &state.selected_conversation {
+        // Find position of this conversation
+        let conv_keys: Vec<_> = state.conversations.keys().collect();
+        if let Some(conv_idx) = conv_keys.iter().position(|&id| id == conv_id) {
+            invite_count + conv_idx
+        } else {
+            0
+        }
+    } else {
+        // Nothing selected, start at beginning
+        0
+    };
+    
+    // Calculate next position
+    let next_pos = (current_pos + 1) % total_items;
+    
+    // Update selection based on new position
+    if next_pos < invite_count {
+        // Selecting an invite
+        new_state.selected_invite = Some(next_pos);
+        new_state.selected_conversation = None;
+    } else {
+        // Selecting a conversation
+        let conv_idx = next_pos - invite_count;
+        let conv_keys: Vec<_> = new_state.conversations.keys().cloned().collect();
+        if let Some(conv_id) = conv_keys.get(conv_idx) {
+            new_state.selected_conversation = Some(conv_id.clone());
+            new_state.selected_invite = None;
+        }
+    }
+    
+    (new_state, Cmd::None)
 }
 
 fn handle_conversations_nav_up(state: &AppState) -> (AppState, Cmd) {
-    // TODO: Navigate up in conversations list
-    (state.clone(), Cmd::None)
+    let mut new_state = state.clone();
+    
+    let invite_count = state.pending_invites.len();
+    let conv_count = state.conversations.len();
+    let _has_separator = invite_count > 0;
+    let total_items = invite_count + conv_count;
+    
+    if total_items == 0 {
+        return (state.clone(), Cmd::None);
+    }
+    
+    // Determine current position
+    let current_pos = if let Some(invite_idx) = state.selected_invite {
+        invite_idx
+    } else if let Some(conv_id) = &state.selected_conversation {
+        // Find position of this conversation
+        let conv_keys: Vec<_> = state.conversations.keys().collect();
+        if let Some(conv_idx) = conv_keys.iter().position(|&id| id == conv_id) {
+            invite_count + conv_idx
+        } else {
+            0
+        }
+    } else {
+        // Nothing selected, start at end
+        total_items - 1
+    };
+    
+    // Calculate previous position
+    let prev_pos = if current_pos == 0 {
+        total_items - 1
+    } else {
+        current_pos - 1
+    };
+    
+    // Update selection based on new position
+    if prev_pos < invite_count {
+        // Selecting an invite
+        new_state.selected_invite = Some(prev_pos);
+        new_state.selected_conversation = None;
+    } else {
+        // Selecting a conversation
+        let conv_idx = prev_pos - invite_count;
+        let conv_keys: Vec<_> = new_state.conversations.keys().cloned().collect();
+        if let Some(conv_id) = conv_keys.get(conv_idx) {
+            new_state.selected_conversation = Some(conv_id.clone());
+            new_state.selected_invite = None;
+        }
+    }
+    
+    (new_state, Cmd::None)
 }
 
 fn handle_send_message(state: &AppState) -> (AppState, Cmd) {
@@ -507,21 +648,24 @@ fn handle_publish_keypackage(state: &AppState) -> (AppState, Cmd) {
 // Invite-related handlers
 fn handle_conversations_enter(state: &AppState) -> (AppState, Cmd) {
     tracing::info!("Conversations enter pressed");
-    // Check if we're selecting an invite or a conversation
-    let invite_count = state.pending_invites.len();
-    let _separator_count = if invite_count > 0 { 1 } else { 0 };
     
-    // For now, determine selection based on a simple index (this could be improved with proper tracking)
-    if state.selected_invite.is_some() {
-        // We have a selected invite
-        if let Some(invite_index) = state.selected_invite {
-            tracing::info!("Selected invite {} - showing accept dialog", invite_index);
-            return handle_show_accept_invite_dialog_for_invite(state, invite_index);
-        }
+    // Check if we have a selected invite
+    if let Some(invite_index) = state.selected_invite {
+        tracing::info!("Selected invite {} - showing accept dialog", invite_index);
+        return handle_show_accept_invite_dialog_for_invite(state, invite_index);
+    }
+    
+    // Check if we have a selected conversation
+    if let Some(conv_id) = &state.selected_conversation {
+        tracing::info!("Selected conversation {}, switching to chat", conv_id);
+        // Switch to the chat pane for the selected conversation
+        let mut new_state = state.clone();
+        new_state.active_pane = ActivePane::Chat;
+        return (new_state, Cmd::None);
     }
     
     // Otherwise, show create conversation dialog
-    tracing::info!("No invite selected - showing create conversation dialog");
+    tracing::info!("No invite or conversation selected - showing create conversation dialog");
     handle_show_create_conversation_dialog(state)
 }
 
@@ -668,6 +812,19 @@ fn handle_log_message(state: &AppState, entry: LogEntry) -> (AppState, Cmd) {
     if new_state.debug_logs.len() > 1000 {
         new_state.debug_logs.drain(0..new_state.debug_logs.len() - 1000);
     }
+    
+    (new_state, Cmd::None)
+}
+
+fn handle_expire_toasts(state: &AppState) -> (AppState, Cmd) {
+    let mut new_state = state.clone();
+    let now = chrono::Utc::now();
+    
+    // Remove expired toasts
+    new_state.toast_notifications.retain(|toast| {
+        let elapsed = now.signed_duration_since(toast.timestamp).num_seconds() as u64;
+        elapsed < toast.duration_secs
+    });
     
     (new_state, Cmd::None)
 }
