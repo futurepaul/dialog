@@ -1,0 +1,17 @@
+[package]
+name = "dialog_lib"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait = "0.1.88"
+chrono = "0.4.41"
+fake = { version = "4.3.0", features = ["derive"] }
+hex = "0.4.3"
+nostr-mls.workspace = true
+rand = "0.9.1"
+thiserror.workspace = true
+tokio = { workspace = true, features = ["full"] }
