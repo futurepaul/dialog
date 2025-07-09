@@ -48,7 +48,7 @@ impl DialogLib {
     }
     
     /// Create a new DialogLib instance with a custom service
-    pub fn new(service: Arc<dyn MlsService>) -> Self {
+    pub fn new_with_service(service: Arc<dyn MlsService>) -> Self {
         Self { service }
     }
     
@@ -64,7 +64,7 @@ impl DialogLib {
                     RealMlsService::new(keys, config.relay_url).await?
                 );
                 
-                Ok(Self::new(service))
+                Ok(Self::new_with_service(service))
             }
         }
     }
@@ -75,20 +75,20 @@ impl DialogLib {
         Self::from_config(config).await
     }
     
-    /// Create a new DialogLib instance for real/production mode with generated keys
-    pub async fn new_real() -> Result<Self> {
+    /// Create a new DialogLib instance with generated keys
+    pub async fn new() -> Result<Self> {
         let config = DialogConfig::builder()
             .mode(ServiceMode::Real)
             .build();
         Self::from_config(config).await
     }
     
-    /// Create a new DialogLib instance for real/production mode with specific keys
-    pub async fn new_real_with_keys(keys: nostr_mls::prelude::Keys) -> Result<Self> {
+    /// Create a new DialogLib instance with specific keys
+    pub async fn new_with_keys(keys: nostr_mls::prelude::Keys) -> Result<Self> {
         let service: Arc<dyn MlsService> = Arc::new(
             RealMlsService::new(keys, "ws://localhost:8080".to_string()).await?
         );
-        Ok(Self::new(service))
+        Ok(Self::new_with_service(service))
     }
     
     /// Create a new DialogLib instance with custom configuration
@@ -161,5 +161,10 @@ impl DialogLib {
     /// Get access to the mock service (if using mock implementation)
     pub fn mock_service(&self) -> Option<&MockMlsService> {
         self.service.as_any().downcast_ref::<MockMlsService>()
+    }
+    
+    /// Get the user's own public key
+    pub async fn get_own_pubkey(&self) -> Result<PublicKey> {
+        self.service.get_own_pubkey().await
     }
 }

@@ -36,7 +36,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new() -> Self {
+    pub async fn new_with_service(dialog_lib: DialogLib) -> Result<Self, Box<dyn std::error::Error>> {
         let mut text_area = TextArea::default();
         text_area.set_cursor_line_style(ratatui::style::Style::default());
         text_area.set_placeholder_text("Type '/' to start a command");
@@ -44,61 +44,24 @@ impl App {
         // Create async message channel for delayed responses
         let (delayed_tx, delayed_rx) = mpsc::unbounded_channel();
 
-        let mut app = Self {
-            mode: AppMode::Normal,
-            text_area,
-            connection_status: ConnectionStatus::Connected,
-            active_conversation: None,
-            contact_count: 0,
-            pending_invites: 0,
-            messages: Vec::new(),
-            scroll_offset: 0,
-            contacts: Vec::new(),
-            conversations: Vec::new(),
-            delayed_message_rx: Some(delayed_rx),
-            delayed_message_tx: Some(delayed_tx),
-            dialog_lib: DialogLib::new_mock(), // Will be replaced in new_async()
-            
-            // Initialize search fields
-            search_suggestions: Vec::new(),
-            selected_suggestion: 0,
-            is_searching: false,
-            search_query: String::new(),
-            search_start_pos: 0,
-        };
-
-        // Add welcome messages
-        app.add_message("* Welcome to Dialog!");
-        app.add_message("");
-        app.add_message("/help for help, /status for your current setup");
-        app.add_message("");
-        app.add_message(&format!("cwd: {}", std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| "unknown".to_string())));
-        app.add_message("");
-
-        app
-    }
-    
-    pub async fn new_async() -> Self {
-        let mut text_area = TextArea::default();
-        text_area.set_cursor_line_style(ratatui::style::Style::default());
-        text_area.set_placeholder_text("Type '/' to start a command");
-        
-        // Create async message channel for delayed responses
-        let (delayed_tx, delayed_rx) = mpsc::unbounded_channel();
-
-        let dialog_lib = DialogLib::new_mock_with_data().await;
+        // Get initial data from the real service
+        let contacts = dialog_lib.get_contacts().await.unwrap_or_default();
+        let conversations = dialog_lib.get_conversations().await.unwrap_or_default();
+        let connection_status = dialog_lib.get_connection_status().await.unwrap_or(ConnectionStatus::Disconnected);
+        let pending_invites = dialog_lib.get_pending_invites_count().await.unwrap_or(0);
+        let active_conversation = dialog_lib.get_active_conversation().await.unwrap_or(None);
 
         let mut app = Self {
             mode: AppMode::Normal,
             text_area,
-            connection_status: ConnectionStatus::Connected,
-            active_conversation: None,
-            contact_count: 0,
-            pending_invites: 0,
+            connection_status,
+            active_conversation,
+            contact_count: contacts.len(),
+            pending_invites,
             messages: Vec::new(),
             scroll_offset: 0,
-            contacts: Vec::new(),
-            conversations: Vec::new(),
+            contacts,
+            conversations,
             delayed_message_rx: Some(delayed_rx),
             delayed_message_tx: Some(delayed_tx),
             dialog_lib,
@@ -119,7 +82,15 @@ impl App {
         app.add_message(&format!("cwd: {}", std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| "unknown".to_string())));
         app.add_message("");
 
-        app
+        // Show initial state info
+        if app.contacts.is_empty() {
+            app.add_message("No contacts yet. MLS mode active.");
+        }
+        if app.conversations.is_empty() {
+            app.add_message("No conversations yet. Use CLI to create groups and invite this TUI.");
+        }
+
+        Ok(app)
     }
 
     pub async fn refresh_data(&mut self) {
@@ -397,6 +368,7 @@ impl App {
                 self.add_message("/contacts - List all contacts");
                 self.add_message("/invites - View pending invitations");
                 self.add_message("/keypackage - Publish your key package");
+                self.add_message("/pk - Show your public key");
                 self.add_message("");
                 self.add_message("Features:");
                 self.add_message("  @ search - Type '@' followed by contact name for fuzzy search");
@@ -513,6 +485,23 @@ impl App {
             "/keypackage" => {
                 self.add_message("Publishing key package (not implemented)");
             }
+            "/pk" => {
+                match self.dialog_lib.get_own_pubkey().await {
+                    Ok(pubkey) => {
+                        self.add_message("Your public key:");
+                        self.add_message("");
+                        match pubkey.to_bech32() {
+                            Ok(bech32) => self.add_message(&format!("  Bech32: {}", bech32)),
+                            Err(_) => self.add_message("  Bech32: (encoding error)"),
+                        }
+                        self.add_message(&format!("  Hex: {}", pubkey.to_hex()));
+                        self.add_message("");
+                    }
+                    Err(e) => {
+                        self.add_message(&format!("Error getting public key: {}", e));
+                    }
+                }
+            }
             "/status" => {
                 self.refresh_data().await;
                 self.add_message("Current setup:");
@@ -534,6 +523,20 @@ impl App {
                 self.add_message(&format!("  Conversations: {}", self.conversations.len()));
                 self.add_message(&format!("  Pending invites: {}", self.pending_invites));
                 self.add_message(&format!("  Total messages: {}", self.messages.len()));
+                
+                // Add pubkey information
+                match self.dialog_lib.get_own_pubkey().await {
+                    Ok(pubkey) => {
+                        match pubkey.to_bech32() {
+                            Ok(bech32) => self.add_message(&format!("  Public key: {}", bech32)),
+                            Err(_) => self.add_message(&format!("  Public key: {}", pubkey.to_hex()[..16].to_string())),
+                        }
+                    }
+                    Err(_) => {
+                        self.add_message("  Public key: (error)");
+                    }
+                }
+                
                 self.add_message("");
             }
             "/connect" => {
@@ -691,14 +694,10 @@ impl App {
         parts.join(" • ")
     }
 
-    async fn generate_fake_response(&self, message: &str, conv: &Conversation) -> String {
-        // For now, use the mock service to generate responses
-        if let Some(mock_service) = self.dialog_lib.mock_service() {
-            mock_service.generate_fake_response(message, conv).await
-        } else {
-            // Fallback to simple response
-            format!("{}: Thanks for your message!", conv.name)
-        }
+    async fn generate_fake_response(&self, _message: &str, conv: &Conversation) -> String {
+        // In real mode, we don't generate fake responses - actual responses come from MLS
+        // This is kept for UI demonstration purposes only
+        format!("{}: Thanks for your message!", conv.name)
     }
 
     // Public getters for the UI
@@ -721,7 +720,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_at_search_detection() {
-        let mut app = App::new_async().await;
+        let dialog_lib = DialogLib::new().await.expect("Failed to create DialogLib");
+        let mut app = App::new_with_service(dialog_lib).await.expect("Failed to create App");
         app.refresh_data().await;
 
         // Test @ search detection
@@ -745,7 +745,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_fuzzy_search_suggestions() {
-        let mut app = App::new_async().await;
+        let dialog_lib = DialogLib::new().await.expect("Failed to create DialogLib");
+        let mut app = App::new_with_service(dialog_lib).await.expect("Failed to create App");
         app.refresh_data().await;
 
         // Simulate typing "@al" to search for Alice
@@ -755,13 +756,14 @@ mod tests {
         if !app.contacts.is_empty() {
             // We should get some suggestions if we have contacts
             app.update_search_suggestions();
-            // The exact results depend on the mock data, so we'll just check the mechanism works
+            // The exact results depend on the data, so we'll just check the mechanism works
         }
     }
 
     #[tokio::test]
     async fn test_suggestion_navigation() {
-        let mut app = App::new_async().await;
+        let dialog_lib = DialogLib::new().await.expect("Failed to create DialogLib");
+        let mut app = App::new_with_service(dialog_lib).await.expect("Failed to create App");
         app.refresh_data().await;
 
         // Set up search
@@ -785,7 +787,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_edge_cases_no_panic() {
-        let mut app = App::new_async().await;
+        let dialog_lib = DialogLib::new().await.expect("Failed to create DialogLib");
+        let mut app = App::new_with_service(dialog_lib).await.expect("Failed to create App");
         app.refresh_data().await;
 
         // Test @ at end of string

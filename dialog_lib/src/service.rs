@@ -16,4 +16,5 @@ pub trait MlsService: Send + Sync + std::fmt::Debug {
     async fn get_active_conversation(&self) -> Result<Option<String>>;
     async fn get_pending_invites_count(&self) -> Result<usize>;
     async fn toggle_connection(&self) -> Result<ConnectionStatus>;
+    async fn get_own_pubkey(&self) -> Result<PublicKey>;
 }

@@ -250,4 +250,8 @@ impl MlsService for RealMlsService {
             }
         }
     }
+
+    async fn get_own_pubkey(&self) -> Result<PublicKey> {
+        Ok(self.keys.public_key())
+    }
 }

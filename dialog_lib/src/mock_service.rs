@@ -14,6 +14,7 @@ pub struct MockMlsService {
     connection_status: Arc<RwLock<ConnectionStatus>>,
     active_conversation: Arc<RwLock<Option<String>>>,
     pending_invites: Arc<RwLock<usize>>,
+    own_pubkey: PublicKey,
 }
 
 impl MockMlsService {
@@ -24,14 +25,15 @@ impl MockMlsService {
             connection_status: Arc::new(RwLock::new(ConnectionStatus::Connected)),
             active_conversation: Arc::new(RwLock::new(None)),
             pending_invites: Arc::new(RwLock::new(2)),
+            own_pubkey: Keys::generate().public_key(),
         };
         
-        // Initialize with fake data
-        let service_clone = service.clone();
-        tokio::spawn(async move {
-            service_clone.setup_fake_data().await;
-        });
-        
+        service
+    }
+    
+    pub async fn new_with_data() -> Self {
+        let service = Self::new();
+        service.setup_fake_data().await;
         service
     }
     
@@ -165,6 +167,7 @@ impl Clone for MockMlsService {
             connection_status: Arc::clone(&self.connection_status),
             active_conversation: Arc::clone(&self.active_conversation),
             pending_invites: Arc::clone(&self.pending_invites),
+            own_pubkey: self.own_pubkey,
         }
     }
 }
@@ -255,5 +258,9 @@ impl MlsService for MockMlsService {
         let mut status = self.connection_status.write().await;
         status.simulate_connection_change();
         Ok(status.clone())
+    }
+
+    async fn get_own_pubkey(&self) -> Result<PublicKey> {
+        Ok(self.own_pubkey)
     }
 }
