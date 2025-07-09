@@ -107,6 +107,44 @@ async fn main() -> Result<()> {
     
     let mut app = App::new_with_service(dialog_lib).await
         .map_err(|e| anyhow::anyhow!("Failed to create app: {}", e))?;
+    
+    // Autoconnect on startup
+    app.add_message("");
+    app.add_message("⚡ Attempting to connect to relay...");
+    match app.dialog_lib.toggle_connection().await {
+        Ok(status) => {
+            app.connection_status = status;
+            if status == dialog_lib::ConnectionStatus::Connected {
+                app.add_message("✅ Connected to relay successfully!");
+                
+                // Create new channel for UI updates
+                let (ui_update_tx, ui_update_rx) = tokio::sync::mpsc::channel(100);
+                app.ui_update_rx = Some(ui_update_rx);
+                
+                // Start subscription for real-time messages
+                if let Err(e) = app.dialog_lib.subscribe_to_groups(ui_update_tx).await {
+                    app.add_message(&format!("⚠️  Failed to start real-time message subscription: {}", e));
+                } else {
+                    app.add_message("✅ Real-time message updates enabled");
+                }
+                
+                // Refresh data to get latest state
+                app.refresh_data().await;
+                
+                // Check if key package is published
+                app.add_message("");
+                app.add_message("💡 Use /keypackage to publish your key package if you haven't already");
+            } else {
+                app.add_message("❌ Failed to connect to relay");
+                app.add_message("You can try /connect later to establish a connection");
+            }
+        }
+        Err(e) => {
+            app.add_message(&format!("❌ Connection failed: {}", e));
+            app.add_message("You can try /connect later to establish a connection");
+        }
+    }
+    app.add_message("");
 
     // Run app
     let res = run_app(&mut terminal, &mut app).await;

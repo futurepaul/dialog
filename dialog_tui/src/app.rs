@@ -112,9 +112,7 @@ impl App {
         // Add welcome messages
         app.add_message("* Welcome to Dialog!");
         app.add_message("");
-        app.add_message("⚡ Use /connect to connect to the relay");
         app.add_message("/help for help, /status for your current setup");
-        app.add_message("");
         app.add_message(&format!("cwd: {}", std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| "unknown".to_string())));
         app.add_message("");
 
@@ -608,6 +606,7 @@ impl App {
                 self.add_message("/add <pubkey> - Add a new contact");
                 self.add_message("/contacts - List all contacts");
                 self.add_message("/keypackage - Publish your key package (required for receiving invites)");
+                self.add_message("/refresh-keys - Publish fresh key packages (replaces old ones)");
                 self.add_message("/create <name> - Create a group (with interactive contact selection)");
                 self.add_message("/invites - View and accept pending group invitations");
                 self.add_message("");
@@ -815,6 +814,30 @@ impl App {
                     }
                     Err(e) => {
                         self.add_message(&format!("❌ Error publishing key package: {}", e));
+                    }
+                }
+            }
+            "/refresh-keys" => {
+                // Check if we're connected first
+                if self.connection_status != ConnectionStatus::Connected {
+                    self.add_message("❌ Cannot refresh key packages - not connected to relay");
+                    self.add_message("Use /connect to establish a connection first");
+                    return;
+                }
+                
+                self.add_message("Refreshing key packages...");
+                self.add_message("⚠️  Note: This will publish new key packages. Old packages will remain valid.");
+                
+                // For now, we'll use the same publish_key_packages method
+                // In the future, this could delete old packages first
+                match self.dialog_lib.publish_key_packages().await {
+                    Ok(()) => {
+                        self.add_message("✅ Fresh key packages published successfully!");
+                        self.add_message("💡 Tip: Groups created with old key packages may still fail.");
+                        self.add_message("    Consider asking contacts to use your latest packages.");
+                    }
+                    Err(e) => {
+                        self.add_message(&format!("❌ Error refreshing key packages: {}", e));
                     }
                 }
             }
