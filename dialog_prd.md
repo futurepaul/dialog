@@ -47,13 +47,12 @@ cd dialog_tui && cargo run -- --data-dir /tmp/bob_data
 2. /keypackage                 # Publish key package
 3. /pk                        # Get your pubkey
 4. /add <other_user_pubkey>   # Add contact
-5. /create TestGroup Bob      # Create group (from Alice)
-6. /invites                   # Check invites (from Bob)
-7. /accept <group_id>         # Accept invite (from Bob)
-8. /switch 1                  # Switch to conversation
-9. Send messages              # Type without / to send
+5. /create TestGroup          # Create group, then select contacts
+6. /invites                   # Check invites, arrow keys to select
+7. /switch                    # Show conversations, arrow to select
+8. Send messages              # Type without / to send
 
-Note: Messages are sent but not yet visible to recipients!
+Note: Interactive selection coming in Phase 5.5!
 ```
 
 ## Project Vision
@@ -344,6 +343,158 @@ Test categories from whitenoise best practices:
 - [ ] Add connection pooling
 - [ ] Profile and optimize hot paths
 
+### Phase 5.5: Interactive UI Enhancements (Week 5)
+**Goal: Improve UX with interactive selection menus**
+
+#### Interactive Selection Design
+Replace command argument typing with interactive list selection using ratatui's `List` and `ListState` widgets. Commands that previously required typing IDs or names will now show navigable lists.
+
+#### Detailed Implementation Plan
+
+1. **State Management Architecture**
+   ```rust
+   // Add to App struct
+   pub enum SelectionMode {
+       None,
+       InviteSelection { 
+           invites: Vec<PendingInvite>, 
+           state: ListState,
+       },
+       ConversationSelection { 
+           state: ListState,
+       },
+       ContactSelection { 
+           group_name: String,
+           selections: Vec<bool>,
+           state: ListState,
+       },
+   }
+   
+   pub selection_mode: SelectionMode,
+   ```
+
+2. **Key Handling Updates**
+   - When in `SelectionMode`, intercept arrow keys for navigation
+   - `KeyCode::Up` / `k` - Move selection up
+   - `KeyCode::Down` / `j` - Move selection down  
+   - `KeyCode::Enter` - Confirm selection
+   - `KeyCode::Escape` - Cancel and return to normal mode
+   - `KeyCode::Space` - Toggle selection (for multi-select in contact picker)
+
+3. **Command Implementations**
+
+   **`/invites` Command:**
+   ```rust
+   // When /invites is entered:
+   1. Fetch pending invites via dialog_lib.list_pending_invites()
+   2. If invites.is_empty(), show "No pending invites"
+   3. Otherwise, enter SelectionMode::InviteSelection
+   4. Display invites as a List widget with:
+      - Group name
+      - Inviter (if available)
+      - Member count
+      - Highlight selected item
+   5. On Enter: accept selected invite
+   6. On Escape: return to normal mode
+   ```
+
+   **`/switch` Command:**
+   ```rust
+   // When /switch is entered:
+   1. Use existing self.conversations
+   2. Enter SelectionMode::ConversationSelection
+   3. Display conversations as numbered list:
+      [1] Group: TestGroup (2 members)
+      [2] Group: WorkChat (5 members)
+   4. Show active conversation with different style
+   5. On Enter: switch to selected conversation
+   ```
+
+   **`/create` Command Enhancement:**
+   ```rust
+   // After entering group name:
+   1. Enter SelectionMode::ContactSelection
+   2. Display contacts with checkboxes:
+      [ ] Alice
+      [x] Bob
+      [ ] Charlie
+   3. Space toggles selection
+   4. Enter confirms and creates group with selected contacts
+   5. Minimum 1 contact must be selected
+   ```
+
+4. **UI Rendering**
+   ```rust
+   // In ui.rs, add selection mode rendering
+   match &app.selection_mode {
+       SelectionMode::InviteSelection { invites, state } => {
+           let items: Vec<ListItem> = invites.iter().map(|invite| {
+               ListItem::new(vec![
+                   Line::from(vec![
+                       Span::styled(&invite.group_name, Style::default().fg(Color::Yellow)),
+                   ]),
+                   Line::from(vec![
+                       Span::raw(format!("  {} members", invite.member_count)),
+                   ]),
+               ])
+           }).collect();
+           
+           let list = List::new(items)
+               .block(Block::default().borders(Borders::ALL).title("Select Invite"))
+               .highlight_style(Style::default().bg(Color::DarkGray))
+               .highlight_symbol(">> ");
+               
+           f.render_stateful_widget(list, area, state);
+           
+           // Show help at bottom
+           let help = "↑↓/jk: Navigate | Enter: Accept | Esc: Cancel";
+       }
+       // Similar for other modes...
+   }
+   ```
+
+5. **State Transitions**
+   ```
+   Normal Mode → Command Input (/invites) → Selection Mode → Action/Cancel → Normal Mode
+   ```
+
+6. **Error Handling**
+   - If no items to select, show message and stay in normal mode
+   - If action fails (e.g., accept invite fails), show error and return to selection
+   - Maintain selection position after errors
+
+#### Migration Steps
+
+1. **Phase 1: /invites** (Highest impact, easiest to implement)
+   - Remove old `/accept <group_id>` command entirely
+   - Implement full selection UI for invites
+   - Test with multiple pending invites
+
+2. **Phase 2: /switch** 
+   - Remove argument parsing from /switch
+   - Use existing conversation list
+   - Highlight active conversation
+
+3. **Phase 3: /create** (Most complex due to multi-select)
+   - Keep group name as text input
+   - Add contact selection step
+   - Validate at least one contact selected
+
+#### Technical Considerations
+
+- **ListState Management**: Each selection mode needs its own `ListState` to track position
+- **Bounds Checking**: Ensure selection stays within list bounds
+- **Visual Feedback**: Clear highlighting and help text
+- **Keyboard Shortcuts**: Support both arrow keys and vim keys (j/k)
+- **Focus Management**: Properly handle focus between text input and selection modes
+
+#### Benefits
+- **No More ID Copying**: Users never need to copy/paste group IDs
+- **Discoverable**: Users can see all options without separate list commands
+- **Faster**: Direct selection is quicker than typing IDs
+- **Error-Free**: Can't mistype an ID or select invalid option
+- **Modern UX**: Matches expectations from other TUI apps
+
 ### Phase 6: Advanced Features (Week 6)
 **Goal: Feature parity with modern messengers**
 
@@ -491,10 +642,10 @@ impl TestEnvironment {
 - ✓ Success Criteria: Can create groups and process invites via TUI
 - ✓ Actual: All group operations working, commands integrated
 
-### Milestone 2: Real-time Messaging (1 week) 🚧 IN PROGRESS
-- ⬜ Deliverable: Live message reception and display
-- ⬜ Success Criteria: Messages appear instantly in TUI as they're sent
-- 🎯 Current: Implementing message fetch and subscription system
+### Milestone 2: Real-time Messaging (1 week) ✅ COMPLETED
+- ✓ Deliverable: Live message reception and display
+- ✓ Success Criteria: Messages appear instantly in TUI as they're sent
+- ✓ Actual: WebSocket subscriptions working, invite notifications live
 
 ### Milestone 3: Cross-Client Messaging (1 week)
 - ⬜ Deliverable: TUI ↔ CLI interoperability  
@@ -507,6 +658,18 @@ impl TestEnvironment {
 ### Milestone 5: Production Ready (1 week)
 - ⬜ Deliverable: Tested, optimized, documented system
 - ⬜ Success Criteria: Passing all test scenarios, <500ms latency
+
+## Known Issues
+
+1. **Old Key Packages**
+   - Issue: If a user has old key packages on the relay that they no longer have private keys for, group creation will fail
+   - Workaround: Users should republish fresh key packages if group creation fails
+   - Future fix: Implement key package expiration/rotation
+
+2. **Real-time Message Delivery** 
+   - Issue: Messages not appearing in real-time despite subscription being active
+   - Status: Under investigation - invite notifications work, so WebSocket is functional
+   - Workaround: Use /fetch command to manually retrieve messages
 
 ## Risks and Mitigations
 
