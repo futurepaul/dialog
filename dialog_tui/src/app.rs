@@ -20,6 +20,23 @@ pub enum ConnectionStatus {
     Disconnected,
 }
 
+#[derive(Debug, Clone)]
+pub struct Contact {
+    pub name: String,
+    pub pubkey: String,
+    pub online: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct Conversation {
+    pub id: String,
+    pub name: String,
+    pub participants: Vec<String>,
+    pub last_message: Option<String>,
+    pub unread_count: usize,
+    pub is_group: bool,
+}
+
 #[derive(Debug)]
 pub struct App {
     pub mode: AppMode,
@@ -30,6 +47,8 @@ pub struct App {
     pub pending_invites: usize,
     pub messages: Vec<String>,
     pub scroll_offset: usize,
+    pub contacts: Vec<Contact>,
+    pub conversations: Vec<Conversation>,
 }
 
 impl App {
@@ -47,6 +66,8 @@ impl App {
             pending_invites: 0,
             messages: Vec::new(),
             scroll_offset: 0,
+            contacts: Vec::new(),
+            conversations: Vec::new(),
         };
 
         // Add welcome messages
@@ -56,6 +77,9 @@ impl App {
         app.add_message("");
         app.add_message(&format!("cwd: {}", std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| "unknown".to_string())));
         app.add_message("");
+
+        // Add fake data
+        app.setup_fake_data();
 
         app
     }
@@ -155,12 +179,19 @@ impl App {
                 self.add_message("");
                 self.add_message("/help - Show this help message");
                 self.add_message("/quit - Exit the application");
+                self.add_message("/status - Show current setup and stats");
                 self.add_message("/add <pubkey|nip05> - Add a new contact");
                 self.add_message("/new - Start a new conversation");
                 self.add_message("/conversations - List active conversations");
+                self.add_message("/switch <number> - Switch to a conversation");
                 self.add_message("/contacts - List all contacts");
                 self.add_message("/invites - View pending invitations");
                 self.add_message("/keypackage - Publish your key package");
+                self.add_message("");
+                self.add_message("Navigation:");
+                self.add_message("  PageUp/PageDown - Scroll through messages");
+                self.add_message("  Ctrl+C - Exit");
+                self.add_message("  Esc - Clear input");
                 self.add_message("");
             }
             "/add" => {
@@ -173,19 +204,130 @@ impl App {
                 }
             }
             "/new" => {
-                self.add_message("Starting new conversation (not implemented)");
+                if parts.len() > 1 {
+                    let contact_name = parts[1];
+                    if let Some(contact) = self.contacts.iter().find(|c| c.name.to_lowercase() == contact_name.to_lowercase()) {
+                        let conv_id = format!("conv-{}", contact.name.to_lowercase());
+                        if !self.conversations.iter().any(|c| c.id == conv_id) {
+                            self.conversations.push(Conversation {
+                                id: conv_id.clone(),
+                                name: contact.name.clone(),
+                                participants: vec![contact.name.clone()],
+                                last_message: None,
+                                unread_count: 0,
+                                is_group: false,
+                            });
+                            self.add_message(&format!("Started new conversation with {}", contact.name));
+                            self.active_conversation = Some(conv_id);
+                        } else {
+                            self.add_message(&format!("Conversation with {} already exists", contact.name));
+                        }
+                    } else {
+                        self.add_message(&format!("Contact '{}' not found. Use /contacts to see available contacts.", contact_name));
+                    }
+                } else {
+                    self.add_message("Usage: /new <contact_name>");
+                    self.add_message("Example: /new Alice");
+                }
             }
             "/conversations" => {
-                self.add_message("No active conversations");
+                if self.conversations.is_empty() {
+                    self.add_message("No active conversations");
+                } else {
+                    self.add_message("Active conversations:");
+                    self.add_message("");
+                    
+                    // Clone the conversations to avoid borrowing issues
+                    let conversations = self.conversations.clone();
+                    let active_conv = self.active_conversation.clone();
+                    
+                    for (i, conv) in conversations.iter().enumerate() {
+                        let unread = if conv.unread_count > 0 {
+                            format!(" ({} unread)", conv.unread_count)
+                        } else {
+                            String::new()
+                        };
+                        let active = if Some(conv.id.clone()) == active_conv {
+                            " [ACTIVE]"
+                        } else {
+                            ""
+                        };
+                        let group_indicator = if conv.is_group { "[GROUP] " } else { "" };
+                        self.add_message(&format!("  {}: {}{}{}{}", i + 1, group_indicator, conv.name, unread, active));
+                        if let Some(ref last_msg) = conv.last_message {
+                            self.add_message(&format!("      Last: {}", last_msg));
+                        }
+                    }
+                    self.add_message("");
+                    self.add_message("Use '/switch <number>' to switch to a conversation");
+                }
             }
             "/contacts" => {
-                self.add_message(&format!("You have {} contacts", self.contact_count));
+                if self.contacts.is_empty() {
+                    self.add_message("You have no contacts");
+                } else {
+                    self.add_message(&format!("You have {} contacts:", self.contacts.len()));
+                    self.add_message("");
+                    
+                    // Clone the contacts to avoid borrowing issues
+                    let contacts = self.contacts.clone();
+                    for (i, contact) in contacts.iter().enumerate() {
+                        let status = if contact.online { "online" } else { "offline" };
+                        self.add_message(&format!("  {}: {} ({}) - {}", i + 1, contact.name, status, contact.pubkey));
+                    }
+                    self.add_message("");
+                }
             }
             "/invites" => {
                 self.add_message(&format!("You have {} pending invitations", self.pending_invites));
             }
             "/keypackage" => {
                 self.add_message("Publishing key package (not implemented)");
+            }
+            "/status" => {
+                self.add_message("Current setup:");
+                self.add_message("");
+                self.add_message(&format!("  Working directory: {}", std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| "unknown".to_string())));
+                self.add_message(&format!("  Connection status: {:?}", self.connection_status));
+                self.add_message(&format!("  Active conversation: {}", self.active_conversation.as_ref().unwrap_or(&"None".to_string())));
+                self.add_message(&format!("  Contacts: {}", self.contacts.len()));
+                self.add_message(&format!("  Conversations: {}", self.conversations.len()));
+                self.add_message(&format!("  Pending invites: {}", self.pending_invites));
+                self.add_message(&format!("  Total messages: {}", self.messages.len()));
+                self.add_message("");
+            }
+            "/switch" => {
+                if parts.len() > 1 {
+                    if let Ok(num) = parts[1].parse::<usize>() {
+                        if num > 0 && num <= self.conversations.len() {
+                            // Clone the conversation data to avoid borrowing issues
+                            let conv = self.conversations[num - 1].clone();
+                            self.active_conversation = Some(conv.id.clone());
+                            self.add_message(&format!("Switched to conversation: {}", conv.name));
+                            
+                            // Add some fake conversation history
+                            self.add_message("");
+                            self.add_message("--- Conversation History ---");
+                            if conv.is_group {
+                                self.add_message("Alice: Hey everyone!");
+                                self.add_message("Bob: Hi Alice! How's everyone doing?");
+                                self.add_message("You: Good to see you all!");
+                            } else {
+                                self.add_message(&format!("{}: Hey there!", conv.name));
+                                self.add_message("You: Hi! How are you?");
+                                self.add_message(&format!("{}: I'm doing well, thanks for asking!", conv.name));
+                            }
+                            self.add_message("--- End History ---");
+                            self.add_message("");
+                        } else {
+                            self.add_message(&format!("Invalid conversation number. Use 1-{}", self.conversations.len()));
+                        }
+                    } else {
+                        self.add_message("Usage: /switch <conversation_number>");
+                    }
+                } else {
+                    self.add_message("Usage: /switch <conversation_number>");
+                }
             }
             _ => {
                 self.add_message(&format!("Unknown command: {}", parts[0]));
@@ -194,10 +336,39 @@ impl App {
     }
 
     async fn process_message(&mut self, message: &str) {
-        if self.active_conversation.is_some() {
-            self.add_message(&format!("You: {}", message));
+        if let Some(ref active_id) = self.active_conversation {
+            // Clone the conversation data to avoid borrowing issues
+            if let Some(conv) = self.conversations.iter().find(|c| c.id == *active_id).cloned() {
+                self.add_message(&format!("You: {}", message));
+                
+                // Simulate a fake response after a short delay
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                
+                if conv.is_group {
+                    let responses = [
+                        "Alice: That's interesting!",
+                        "Bob: I agree with that.",
+                        "Charlie: Good point!",
+                        "Diana: Thanks for sharing!",
+                    ];
+                    let response = responses[message.len() % responses.len()];
+                    self.add_message(response);
+                } else {
+                    let responses = [
+                        "Sounds good!",
+                        "I see what you mean.",
+                        "That's interesting to hear.",
+                        "Thanks for letting me know!",
+                        "I'll think about that.",
+                    ];
+                    let response = responses[message.len() % responses.len()];
+                    self.add_message(&format!("{}: {}", conv.name, response));
+                }
+            } else {
+                self.add_message("Error: Active conversation not found.");
+            }
         } else {
-            self.add_message("No active conversation. Use /new to start one.");
+            self.add_message("No active conversation. Use /conversations to see available conversations or /new to start one.");
         }
     }
 
@@ -229,7 +400,17 @@ impl App {
         };
 
         let conversation_info = match &self.active_conversation {
-            Some(name) => format!("Talking to {}", name),
+            Some(active_id) => {
+                if let Some(conv) = self.conversations.iter().find(|c| c.id == *active_id) {
+                    if conv.is_group {
+                        format!("Group: {}", conv.name)
+                    } else {
+                        format!("Talking to {}", conv.name)
+                    }
+                } else {
+                    "Unknown conversation".to_string()
+                }
+            }
             None => "No active conversation".to_string(),
         };
 
@@ -256,5 +437,59 @@ impl App {
         ].into_iter().filter(|s| !s.is_empty()).collect();
 
         parts.join(" • ")
+    }
+
+    fn setup_fake_data(&mut self) {
+        // Add fake contacts
+        self.contacts.push(Contact {
+            name: "Alice".to_string(),
+            pubkey: "npub1alice123456789abcdef...".to_string(),
+            online: true,
+        });
+        self.contacts.push(Contact {
+            name: "Bob".to_string(),
+            pubkey: "npub1bob123456789abcdef...".to_string(),
+            online: false,
+        });
+        self.contacts.push(Contact {
+            name: "Charlie".to_string(),
+            pubkey: "npub1charlie123456789abcdef...".to_string(),
+            online: true,
+        });
+        self.contacts.push(Contact {
+            name: "Diana".to_string(),
+            pubkey: "npub1diana123456789abcdef...".to_string(),
+            online: true,
+        });
+
+        // Add fake conversations
+        self.conversations.push(Conversation {
+            id: "conv-alice".to_string(),
+            name: "Alice".to_string(),
+            participants: vec!["Alice".to_string()],
+            last_message: Some("Hey! How's it going?".to_string()),
+            unread_count: 2,
+            is_group: false,
+        });
+        self.conversations.push(Conversation {
+            id: "conv-group-dev".to_string(),
+            name: "Development Team".to_string(),
+            participants: vec!["Alice".to_string(), "Bob".to_string(), "Charlie".to_string()],
+            last_message: Some("Alice: Let's sync up tomorrow".to_string()),
+            unread_count: 0,
+            is_group: true,
+        });
+        self.conversations.push(Conversation {
+            id: "conv-charlie".to_string(),
+            name: "Charlie".to_string(),
+            participants: vec!["Charlie".to_string()],
+            last_message: Some("Thanks for the help earlier!".to_string()),
+            unread_count: 1,
+            is_group: false,
+        });
+
+        // Update counts
+        self.contact_count = self.contacts.len();
+        self.pending_invites = 2;
     }
 }

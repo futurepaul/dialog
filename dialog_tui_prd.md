@@ -21,6 +21,7 @@ Create a best-in-class terminal messaging application that combines the security
 ### Technology Stack
 - **Language**: Rust
 - **TUI Framework**: Ratatui
+- **Text Input**: tui-textarea crate (recommended for robust text input)
 - **Async Runtime**: Tokio
 - **State Management**: Modified Elm Architecture (TEA)
 - **Backend**: Stubbed Nostr-MLS functionality (for MVP)
@@ -79,7 +80,7 @@ Create a best-in-class terminal messaging application that combines the security
 ├─────────────────────────────────────────────────────────────┤
 │ > /█                                                        │
 ├─────────────────────────────────────────────────────────────┤
-│ No active conversation • 0 contacts • Connected             │
+│ Type '/' to start a command • No active conversation • 0 contacts • Connected │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -107,7 +108,7 @@ Create a best-in-class terminal messaging application that combines the security
 ├─────────────────────────────────────────────────────────────┤
 │ > █                                                         │
 ├─────────────────────────────────────────────────────────────┤
-│ Alice (online) • Group: Development Team • Encrypted        │
+│ Type message and press Enter to send • Alice (online) • Group: Development Team • Encrypted │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -641,14 +642,134 @@ pub struct Theme {
 }
 ```
 
+## Text Input Implementation Research
+
+### Recommended Approach: tui-textarea
+Based on research of modern Ratatui applications and best practices, the **tui-textarea** crate is the recommended solution for robust text input handling.
+
+#### Key Benefits:
+- **Robust Multi-line Support**: Handles complex text editing scenarios
+- **Rich Key Bindings**: Extensive default key mappings (Ctrl+H, Ctrl+D, Ctrl+K, etc.)
+- **Backend Agnostic**: Works with crossterm, termion, and termwiz
+- **Vim-like Support**: Optional vim emulation for power users
+- **Search Integration**: Built-in search functionality with regex support
+
+#### Implementation Example from Oatmeal App:
+The Oatmeal terminal chat application (similar single-column layout) successfully uses `TextArea` for text input with:
+
+```rust
+// Layout structure
+let layout = Layout::default()
+    .direction(Direction::Vertical)
+    .constraints(vec![
+        Constraint::Min(1),  // Top section (messages)
+        Constraint::Max(textarea_len)  // Bottom section (input)
+    ])
+    .split(frame.size());
+
+// Event handling
+textarea.input(key_event);
+```
+
+#### Recommended Dependencies:
+```toml
+[dependencies]
+ratatui = "0.26"
+tui-textarea = "0.4"
+crossterm = "0.27"  # Or matching version with ratatui
+```
+
+### Status Line Specification
+The status line provides critical user context and should display:
+
+#### Primary Status Indicators:
+1. **Input Mode Context**: Clear indication of current input state
+   - Command mode: `"Type '/' to start a command"`
+   - Message mode: `"Type message and press Enter to send"`
+   - Search mode: `"Type to search, Enter to select"`
+
+2. **Connection State**: Real-time connection status
+   - `"Connected"` (green)
+   - `"Connecting..."` (yellow)
+   - `"Disconnected"` (red)
+
+3. **Conversation Context**: Current conversation info
+   - `"No active conversation"` (when none selected)
+   - `"Alice (online)"` (for direct messages)
+   - `"Group: Development Team"` (for group chats)
+
+4. **User State**: Additional context
+   - Contact count: `"5 contacts"`
+   - Pending invites: `"2 pending invites"`
+   - Encryption status: `"Encrypted"`
+
+#### Status Line Format:
+```
+[Input Context] • [Conversation Info] • [Contact Count] • [Connection Status]
+```
+
+### Scroll Handling Strategy: Native Terminal Scrolling
+
+Following Claude Code's approach, Dialog TUI will use **native terminal scrolling** rather than alternate screen mode. This provides a superior user experience where conversation history persists in the terminal's scrollback buffer.
+
+#### Implementation Approach:
+```rust
+// Initialize with inline viewport (fixed TUI height at bottom)
+let terminal = ratatui::init_with_options(TerminalOptions {
+    viewport: Viewport::Inline(3), // Input + status + border
+});
+
+// New messages inserted above TUI area
+terminal.insert_before(1, |buf| {
+    Paragraph::new("Alice: Hello there!")
+        .render(buf.area, buf);
+});
+```
+
+#### Key Benefits:
+- **Persistent History**: Messages remain in terminal scrollback after app exit
+- **Native Scrolling**: Users can scroll up to see conversation history
+- **Familiar UX**: Works exactly like Claude Code's interface
+- **No Flickering**: Recent ratatui versions resolved flickering issues
+
+#### Layout Structure:
+```
+┌─ Terminal Scrollback (native scroll) ──────────────────────┐
+│ Alice: Hey! How's the new UI coming along?                │
+│                                                           │
+│ You: It's looking great! The Claude Code style really    │
+│      works well for this.                                │
+│                                                           │
+│ Alice: Awesome! Can't wait to see it in action.          │
+│ ... (scrollable history) ...                             │
+├─ Fixed TUI Area (inline viewport) ─────────────────────────┤
+│ > █                                                       │
+├───────────────────────────────────────────────────────────┤
+│ Type message and press Enter • Alice (online) • Encrypted │
+└───────────────────────────────────────────────────────────┘
+```
+
+### Alternative to Current Broken Implementation
+Rather than fixing the current broken text input implementation, this PRD recommends:
+
+1. **Start Fresh**: Use tui-textarea as the foundation
+2. **Follow Proven Patterns**: Study the Oatmeal app's successful implementation
+3. **Implement Native Scrolling**: Use ratatui's inline viewport for Claude Code-style scrolling
+4. **Implement Status Line**: Add clear user state indication
+5. **Test Thoroughly**: Ensure all key bindings work correctly
+
+This approach leverages battle-tested libraries and proven UI patterns rather than attempting to fix custom implementations.
+
 ## Implementation Phases
 
 ### Phase 1: Core UI Foundation (MVP)
-1. Basic Ratatui application structure
-2. Command input and parsing
-3. Help/welcome screen
-4. Status bar
-5. Basic theming
+1. Basic Ratatui application structure with inline viewport (3-line fixed TUI)
+2. tui-textarea integration for robust text input
+3. Native terminal scrolling using terminal.insert_before()
+4. Command input and parsing using TextArea
+5. Help/welcome screen
+6. Status bar with context indicators
+7. Basic theming
 
 ### Phase 2: Command System
 1. Command palette implementation
