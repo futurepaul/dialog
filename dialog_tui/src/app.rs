@@ -1,7 +1,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tui_textarea::TextArea;
 use tokio::sync::mpsc;
-use dialog_lib::{DialogLib, Contact, Conversation, ConnectionStatus, AppMode, AppResult, ToBech32, hex, GroupId, UiUpdate};
+use ratatui::widgets::ListState;
+use dialog_lib::{DialogLib, Contact, Conversation, ConnectionStatus, AppMode, AppResult, ToBech32, hex, GroupId, UiUpdate, PendingInvite};
 use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
 
 #[derive(Debug, Clone)]
@@ -9,6 +10,23 @@ pub struct ContactSuggestion {
     pub contact: Contact,
     pub score: i64,
     pub display_text: String,
+}
+
+#[derive(Debug)]
+pub enum SelectionMode {
+    None,
+    InviteSelection { 
+        invites: Vec<PendingInvite>, 
+        state: ListState,
+    },
+    ConversationSelection { 
+        state: ListState,
+    },
+    ContactSelection { 
+        group_name: String,
+        selections: Vec<bool>,
+        state: ListState,
+    },
 }
 
 #[derive(Debug)]
@@ -36,6 +54,9 @@ pub struct App {
     
     // Real-time update receiver
     pub ui_update_rx: Option<mpsc::Receiver<UiUpdate>>,
+    
+    // Selection mode for interactive commands
+    pub selection_mode: SelectionMode,
 }
 
 impl App {
@@ -83,6 +104,9 @@ impl App {
             
             // Real-time updates
             ui_update_rx: Some(ui_update_rx),
+            
+            // Interactive selection mode
+            selection_mode: SelectionMode::None,
         };
 
         // Add welcome messages
@@ -134,6 +158,11 @@ impl App {
     }
 
     pub async fn handle_key(&mut self, key: KeyEvent) -> AppResult {
+        // Handle selection mode navigation first
+        if !matches!(self.selection_mode, SelectionMode::None) {
+            return self.handle_selection_key(key).await;
+        }
+        
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 return AppResult::Exit;
@@ -344,6 +373,208 @@ impl App {
             }
         }
     }
+    
+    async fn handle_selection_key(&mut self, key: KeyEvent) -> AppResult {
+        match key.code {
+            KeyCode::Esc => {
+                self.selection_mode = SelectionMode::None;
+                self.add_message("Selection cancelled");
+                return AppResult::Continue;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                match &mut self.selection_mode {
+                    SelectionMode::InviteSelection { state, invites } => {
+                        if !invites.is_empty() {
+                            let i = match state.selected() {
+                                Some(i) => {
+                                    if i == 0 {
+                                        invites.len() - 1
+                                    } else {
+                                        i - 1
+                                    }
+                                }
+                                None => 0,
+                            };
+                            state.select(Some(i));
+                        }
+                    }
+                    SelectionMode::ConversationSelection { state } => {
+                        if !self.conversations.is_empty() {
+                            let i = match state.selected() {
+                                Some(i) => {
+                                    if i == 0 {
+                                        self.conversations.len() - 1
+                                    } else {
+                                        i - 1
+                                    }
+                                }
+                                None => 0,
+                            };
+                            state.select(Some(i));
+                        }
+                    }
+                    SelectionMode::ContactSelection { state, selections, .. } => {
+                        if !selections.is_empty() {
+                            let i = match state.selected() {
+                                Some(i) => {
+                                    if i == 0 {
+                                        selections.len() - 1
+                                    } else {
+                                        i - 1
+                                    }
+                                }
+                                None => 0,
+                            };
+                            state.select(Some(i));
+                        }
+                    }
+                    _ => {}
+                }
+                return AppResult::Continue;
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                match &mut self.selection_mode {
+                    SelectionMode::InviteSelection { state, invites } => {
+                        if !invites.is_empty() {
+                            let i = match state.selected() {
+                                Some(i) => {
+                                    if i >= invites.len() - 1 {
+                                        0
+                                    } else {
+                                        i + 1
+                                    }
+                                }
+                                None => 0,
+                            };
+                            state.select(Some(i));
+                        }
+                    }
+                    SelectionMode::ConversationSelection { state } => {
+                        if !self.conversations.is_empty() {
+                            let i = match state.selected() {
+                                Some(i) => {
+                                    if i >= self.conversations.len() - 1 {
+                                        0
+                                    } else {
+                                        i + 1
+                                    }
+                                }
+                                None => 0,
+                            };
+                            state.select(Some(i));
+                        }
+                    }
+                    SelectionMode::ContactSelection { state, selections, .. } => {
+                        if !selections.is_empty() {
+                            let i = match state.selected() {
+                                Some(i) => {
+                                    if i >= selections.len() - 1 {
+                                        0
+                                    } else {
+                                        i + 1
+                                    }
+                                }
+                                None => 0,
+                            };
+                            state.select(Some(i));
+                        }
+                    }
+                    _ => {}
+                }
+                return AppResult::Continue;
+            }
+            KeyCode::Char(' ') => {
+                // Space toggles selection in ContactSelection mode
+                if let SelectionMode::ContactSelection { state, selections, .. } = &mut self.selection_mode {
+                    if let Some(i) = state.selected() {
+                        if i < selections.len() {
+                            selections[i] = !selections[i];
+                        }
+                    }
+                }
+                return AppResult::Continue;
+            }
+            KeyCode::Enter => {
+                match &self.selection_mode {
+                    SelectionMode::InviteSelection { state, invites } => {
+                        if let Some(i) = state.selected() {
+                            if i < invites.len() {
+                                let invite = &invites[i];
+                                let group_id = hex::encode(invite.group_id.as_slice());
+                                self.selection_mode = SelectionMode::None;
+                                
+                                // Process the accept command
+                                self.add_message(&format!("Accepting invite for group {}...", group_id));
+                                match self.dialog_lib.accept_invite(&group_id).await {
+                                    Ok(()) => {
+                                        self.add_message("✅ Successfully joined group!");
+                                        self.add_message("The group should now appear in your conversations.");
+                                        self.refresh_data().await;
+                                    }
+                                    Err(e) => {
+                                        self.add_message(&format!("❌ Error accepting invite: {}", e));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    SelectionMode::ConversationSelection { state } => {
+                        if let Some(i) = state.selected() {
+                            if i < self.conversations.len() {
+                                let conv = self.conversations[i].clone();
+                                self.selection_mode = SelectionMode::None;
+                                
+                                if let Ok(()) = self.dialog_lib.switch_conversation(&conv.id).await {
+                                    self.active_conversation = Some(conv.id.clone());
+                                    self.add_message(&format!("Switched to conversation: {}", conv.name));
+                                    self.add_message("");
+                                    self.add_message("Use /fetch to load messages from this conversation");
+                                }
+                            }
+                        }
+                    }
+                    SelectionMode::ContactSelection { group_name, selections, .. } => {
+                        // Collect selected contacts
+                        let selected_contacts: Vec<_> = self.contacts.iter()
+                            .zip(selections.iter())
+                            .filter(|(_, selected)| **selected)
+                            .map(|(contact, _)| contact.pubkey)
+                            .collect();
+                        
+                        if selected_contacts.is_empty() {
+                            self.add_message("❌ Please select at least one contact");
+                            return AppResult::Continue;
+                        }
+                        
+                        let group_name = group_name.clone();
+                        self.selection_mode = SelectionMode::None;
+                        
+                        self.add_message(&format!("Creating group '{}' with {} participant(s)...", group_name, selected_contacts.len()));
+                        match self.dialog_lib.create_conversation(&group_name, selected_contacts).await {
+                            Ok(group_id) => {
+                                self.add_message(&format!("✅ Group '{}' created successfully!", group_name));
+                                self.add_message(&format!("Group ID: {}", group_id));
+                                self.add_message("Invitations have been sent to all participants.");
+                                self.refresh_data().await;
+                            }
+                            Err(e) => {
+                                self.add_message(&format!("❌ Error creating group: {}", e));
+                                if e.to_string().contains("key package") {
+                                    self.add_message("Make sure all participants have published their key packages.");
+                                    self.add_message("They can use /keypackage command to publish.");
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                return AppResult::Continue;
+            }
+            _ => {}
+        }
+        
+        AppResult::Continue
+    }
 
     async fn process_input(&mut self, input: &str) {
         if input.starts_with('/') {
@@ -377,13 +608,12 @@ impl App {
                 self.add_message("/add <pubkey> - Add a new contact");
                 self.add_message("/contacts - List all contacts");
                 self.add_message("/keypackage - Publish your key package (required for receiving invites)");
-                self.add_message("/create <name> <contact1> [contact2]... - Create a group");
-                self.add_message("/invites - View pending group invitations");
-                self.add_message("/accept <group_id> - Accept a group invitation");
+                self.add_message("/create <name> - Create a group (with interactive contact selection)");
+                self.add_message("/invites - View and accept pending group invitations");
                 self.add_message("");
                 self.add_message("Conversations:");
                 self.add_message("/conversations - List active conversations");
-                self.add_message("/switch <number> - Switch to a conversation");
+                self.add_message("/switch - Switch to a conversation (interactive)");
                 self.add_message("/fetch - Fetch and display messages in the active conversation");
                 self.add_message("");
                 self.add_message("Features:");
@@ -434,9 +664,8 @@ impl App {
                 self.add_message("Use /create to create a new group conversation");
             }
             "/create" => {
-                if parts.len() > 2 {
-                    let group_name = parts[1];
-                    let contact_names = parts[2..].to_vec();
+                if parts.len() > 1 {
+                    let group_name = parts[1..].join(" ");
                     
                     // Check if we're connected first
                     if self.connection_status != ConnectionStatus::Connected {
@@ -445,49 +674,26 @@ impl App {
                         return;
                     }
                     
-                    // Collect public keys for all mentioned contacts
-                    let mut participants = Vec::new();
-                    let mut missing_contacts = Vec::new();
-                    
-                    for name in &contact_names {
-                        if let Some(contact) = self.contacts.iter().find(|c| c.name.to_lowercase() == name.to_lowercase()) {
-                            participants.push(contact.pubkey);
-                        } else {
-                            missing_contacts.push(name.as_ref());
-                        }
-                    }
-                    
-                    if !missing_contacts.is_empty() {
-                        self.add_message(&format!("❌ Contacts not found: {}", missing_contacts.join(", ")));
-                        self.add_message("Use /contacts to see available contacts.");
+                    // Check if we have any contacts
+                    if self.contacts.is_empty() {
+                        self.add_message("❌ No contacts available. Add contacts first using /add <pubkey>");
                         return;
                     }
                     
-                    if participants.is_empty() {
-                        self.add_message("❌ No valid participants specified");
-                        return;
-                    }
-                    
-                    self.add_message(&format!("Creating group '{}' with {} participant(s)...", group_name, participants.len()));
-                    match self.dialog_lib.create_conversation(group_name, participants).await {
-                        Ok(group_id) => {
-                            self.add_message(&format!("✅ Group '{}' created successfully!", group_name));
-                            self.add_message(&format!("Group ID: {}", group_id));
-                            self.add_message("Invitations have been sent to all participants.");
-                            self.refresh_data().await;
-                        }
-                        Err(e) => {
-                            self.add_message(&format!("❌ Error creating group: {}", e));
-                            if e.to_string().contains("key package") {
-                                self.add_message("Make sure all participants have published their key packages.");
-                                self.add_message("They can use /keypackage command to publish.");
-                            }
-                        }
-                    }
+                    // Enter contact selection mode
+                    let selections = vec![false; self.contacts.len()];
+                    let mut state = ListState::default();
+                    state.select(Some(0));
+                    self.selection_mode = SelectionMode::ContactSelection {
+                        group_name,
+                        selections,
+                        state,
+                    };
+                    self.add_message("Select contacts for the group. Use arrow keys to navigate, Space to toggle, Enter to create, Esc to cancel.");
                 } else {
-                    self.add_message("Usage: /create <group_name> <contact1> [contact2] [contact3] ...");
-                    self.add_message("Example: /create \"Coffee Chat\" Alice Bob");
-                    self.add_message("Note: All participants must have published key packages");
+                    self.add_message("Usage: /create <group_name>");
+                    self.add_message("Example: /create Coffee Chat");
+                    self.add_message("Note: You'll be able to select participants interactively");
                 }
             }
             "/conversations" => {
@@ -531,7 +737,7 @@ impl App {
                         }
                     }
                     self.add_message("");
-                    self.add_message("Use '/switch <number>' to switch to a conversation");
+                    self.add_message("Use '/switch' to switch to a conversation");
                 }
             }
             "/contacts" => {
@@ -572,19 +778,18 @@ impl App {
                             self.add_message("");
                         }
                         
-                        // Then show the invites
+                        // Then handle the invites
                         if result.invites.is_empty() {
                             self.add_message("No pending invites found.");
                         } else {
-                            self.add_message(&format!("You have {} pending invites:", result.invites.len()));
-                            self.add_message("");
-                            for (idx, invite) in result.invites.iter().enumerate() {
-                                self.add_message(&format!("{}. {}", idx + 1, invite.group_name));
-                                self.add_message(&format!("   Group ID: {}", hex::encode(invite.group_id.as_slice())));
-                                self.add_message(&format!("   Members: {}", invite.member_count));
-                                self.add_message("");
-                            }
-                            self.add_message("Use /accept <group_id> to join a group");
+                            // Enter selection mode
+                            let mut state = ListState::default();
+                            state.select(Some(0));
+                            self.selection_mode = SelectionMode::InviteSelection {
+                                invites: result.invites.clone(),
+                                state,
+                            };
+                            self.add_message(&format!("You have {} pending invites. Use arrow keys to select, Enter to accept, Esc to cancel.", result.invites.len()));
                         }
                         // Update the pending invites count
                         self.pending_invites = result.invites.len();
@@ -704,51 +909,14 @@ impl App {
                 }
             }
             "/switch" => {
-                if parts.len() > 1 {
-                    if let Ok(num) = parts[1].parse::<usize>() {
-                        if num > 0 && num <= self.conversations.len() {
-                            let conv = self.conversations[num - 1].clone();
-                            if let Ok(()) = self.dialog_lib.switch_conversation(&conv.id).await {
-                                self.active_conversation = Some(conv.id.clone());
-                                self.add_message(&format!("Switched to conversation: {}", conv.name));
-                                self.add_message("");
-                                self.add_message("Use /fetch to load messages from this conversation");
-                            }
-                        } else {
-                            self.add_message(&format!("Invalid conversation number. Use 1-{}", self.conversations.len()));
-                        }
-                    } else {
-                        self.add_message("Usage: /switch <conversation_number>");
-                    }
+                if self.conversations.is_empty() {
+                    self.add_message("No conversations available. Create or join a group first.");
                 } else {
-                    self.add_message("Usage: /switch <conversation_number>");
-                }
-            }
-            "/accept" => {
-                if parts.len() > 1 {
-                    let group_id = parts[1];
-                    
-                    // Check if we're connected first
-                    if self.connection_status != ConnectionStatus::Connected {
-                        self.add_message("❌ Cannot accept invite - not connected to relay");
-                        self.add_message("Use /connect to establish a connection first");
-                        return;
-                    }
-                    
-                    self.add_message(&format!("Accepting invite for group {}...", group_id));
-                    match self.dialog_lib.accept_invite(group_id).await {
-                        Ok(()) => {
-                            self.add_message("✅ Successfully joined group!");
-                            self.add_message("The group should now appear in your conversations.");
-                            self.refresh_data().await;
-                        }
-                        Err(e) => {
-                            self.add_message(&format!("❌ Error accepting invite: {}", e));
-                        }
-                    }
-                } else {
-                    self.add_message("Usage: /accept <group_id>");
-                    self.add_message("Get the group ID from /invites command");
+                    // Enter selection mode
+                    let mut state = ListState::default();
+                    state.select(Some(0));
+                    self.selection_mode = SelectionMode::ConversationSelection { state };
+                    self.add_message("Select a conversation. Use arrow keys to navigate, Enter to switch, Esc to cancel.");
                 }
             }
             "/dangerously_publish_profile" => {

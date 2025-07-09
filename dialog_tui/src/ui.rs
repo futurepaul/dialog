@@ -1,12 +1,13 @@
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect, Alignment},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Clear},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Clear, ListState},
     style::{Style, Color, Modifier},
     Frame,
+    text::{Line, Span},
 };
 
 use crate::{
-    app::App,
+    app::{App, SelectionMode},
     theme::Theme,
 };
 
@@ -35,6 +36,11 @@ pub fn draw(f: &mut Frame, app: &App) {
     // Draw search suggestions overlay if in search mode
     if app.is_in_search_mode() {
         draw_search_suggestions(f, chunks[1], app, &theme);
+    }
+    
+    // Draw selection mode overlay if active
+    if !matches!(app.selection_mode, SelectionMode::None) {
+        draw_selection_mode(f, app, &theme);
     }
 }
 
@@ -143,4 +149,170 @@ fn draw_search_suggestions(f: &mut Frame, input_area: Rect, app: &App, _theme: &
         );
 
     f.render_widget(suggestions_list, popup_area);
+}
+
+fn draw_selection_mode(f: &mut Frame, app: &App, theme: &Theme) {
+    match &app.selection_mode {
+        SelectionMode::None => return,
+        SelectionMode::InviteSelection { invites, state } => {
+            draw_invite_selection(f, invites, state, theme);
+        }
+        SelectionMode::ConversationSelection { state } => {
+            draw_conversation_selection(f, &app.conversations, state, theme);
+        }
+        SelectionMode::ContactSelection { group_name, selections, state } => {
+            draw_contact_selection(f, group_name, &app.contacts, selections, state, theme);
+        }
+    }
+}
+
+fn draw_invite_selection(f: &mut Frame, invites: &[dialog_lib::PendingInvite], state: &ListState, theme: &Theme) {
+    let area = centered_rect(80, 80, f.area());
+    
+    // Clear the area
+    f.render_widget(Clear, area);
+    
+    let items: Vec<ListItem> = invites.iter().map(|invite| {
+        ListItem::new(vec![
+            Line::from(vec![
+                Span::styled(&invite.group_name, Style::default().fg(Color::Yellow)),
+            ]),
+            Line::from(vec![
+                Span::raw(format!("  {} members", invite.member_count)),
+            ]),
+        ])
+    }).collect();
+    
+    let list = List::new(items)
+        .block(Block::default()
+            .borders(Borders::ALL)
+            .title("Select Invite to Accept")
+            .border_style(theme.border_focused_style()))
+        .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
+        .highlight_symbol(">> ");
+    
+    f.render_stateful_widget(list, area, &mut state.clone());
+    
+    // Help text
+    let help = Paragraph::new("↑↓/jk: Navigate | Enter: Accept | Esc: Cancel")
+        .style(theme.help_style())
+        .alignment(Alignment::Center);
+    
+    let help_area = Rect {
+        x: area.x,
+        y: area.y + area.height - 1,
+        width: area.width,
+        height: 1,
+    };
+    f.render_widget(help, help_area);
+}
+
+fn draw_conversation_selection(f: &mut Frame, conversations: &[dialog_lib::Conversation], state: &ListState, theme: &Theme) {
+    let area = centered_rect(80, 80, f.area());
+    
+    // Clear the area
+    f.render_widget(Clear, area);
+    
+    let items: Vec<ListItem> = conversations.iter().enumerate().map(|(i, conv)| {
+        let group_indicator = if conv.is_group { "[GROUP] " } else { "" };
+        let unread = if conv.unread_count > 0 {
+            format!(" ({} unread)", conv.unread_count)
+        } else {
+            String::new()
+        };
+        
+        ListItem::new(vec![
+            Line::from(vec![
+                Span::raw(format!("{}: {}{}", i + 1, group_indicator, conv.name)),
+                Span::styled(unread, Style::default().fg(Color::Red)),
+            ]),
+        ])
+    }).collect();
+    
+    let list = List::new(items)
+        .block(Block::default()
+            .borders(Borders::ALL)
+            .title("Select Conversation")
+            .border_style(theme.border_focused_style()))
+        .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
+        .highlight_symbol(">> ");
+    
+    f.render_stateful_widget(list, area, &mut state.clone());
+    
+    // Help text
+    let help = Paragraph::new("↑↓/jk: Navigate | Enter: Switch | Esc: Cancel")
+        .style(theme.help_style())
+        .alignment(Alignment::Center);
+    
+    let help_area = Rect {
+        x: area.x,
+        y: area.y + area.height - 1,
+        width: area.width,
+        height: 1,
+    };
+    f.render_widget(help, help_area);
+}
+
+fn draw_contact_selection(f: &mut Frame, group_name: &str, contacts: &[dialog_lib::Contact], selections: &[bool], state: &ListState, theme: &Theme) {
+    let area = centered_rect(80, 80, f.area());
+    
+    // Clear the area
+    f.render_widget(Clear, area);
+    
+    let items: Vec<ListItem> = contacts.iter().zip(selections.iter()).map(|(contact, selected)| {
+        let checkbox = if *selected { "[x]" } else { "[ ]" };
+        let status = if contact.online { "(online)" } else { "(offline)" };
+        
+        ListItem::new(vec![
+            Line::from(vec![
+                Span::raw(format!("{} {} ", checkbox, contact.name)),
+                Span::styled(status, Style::default().fg(if contact.online { Color::Green } else { Color::Gray })),
+            ]),
+        ])
+    }).collect();
+    
+    let title = format!("Select Contacts for '{}'", group_name);
+    let list = List::new(items)
+        .block(Block::default()
+            .borders(Borders::ALL)
+            .title(title)
+            .border_style(theme.border_focused_style()))
+        .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
+        .highlight_symbol(">> ");
+    
+    f.render_stateful_widget(list, area, &mut state.clone());
+    
+    // Help text
+    let help = Paragraph::new("↑↓/jk: Navigate | Space: Toggle | Enter: Create | Esc: Cancel")
+        .style(theme.help_style())
+        .alignment(Alignment::Center);
+    
+    let help_area = Rect {
+        x: area.x,
+        y: area.y + area.height - 1,
+        width: area.width,
+        height: 1,
+    };
+    f.render_widget(help, help_area);
+}
+
+/// Helper function to create a centered rect using percentage of the available area
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
 }

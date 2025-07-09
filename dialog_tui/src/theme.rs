@@ -62,4 +62,10 @@ impl Theme {
         Style::default()
             .fg(self.fg_primary)
     }
+    
+    pub fn help_style(&self) -> Style {
+        Style::default()
+            .fg(self.fg_secondary)
+            .bg(self.bg_secondary)
+    }
 }
