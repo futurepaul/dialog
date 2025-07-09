@@ -32,3 +32,7 @@ serde_json = "1.0"
 # For mock data generation
 rand = "0.8"
 fake = { version = "2.9", features = ["derive"] }
+
+# Nostr-MLS dependencies
+nostr-mls = { workspace = true }
+hex = "0.4"

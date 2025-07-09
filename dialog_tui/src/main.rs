@@ -59,17 +59,14 @@ async fn main() -> Result<()> {
 
 async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
     loop {
-        // Check for delayed messages before drawing
-        app.check_delayed_messages();
+        // Check for delayed messages and track if we got any
+        let _had_delayed_messages = app.check_delayed_messages();
         
         terminal.draw(|f| ui::draw(f, app))?;
 
-        // Use timeout to ensure we process delayed messages even when no input
-        if let Ok(event) = tokio::time::timeout(
-            tokio::time::Duration::from_millis(100),
-            async { event::read() }
-        ).await {
-            if let Ok(Event::Key(key)) = event {
+        // Check for input events without blocking
+        if event::poll(std::time::Duration::from_millis(50))? {
+            if let Ok(Event::Key(key)) = event::read() {
                 if key.kind == KeyEventKind::Press {
                     match app.handle_key(key).await {
                         AppResult::Continue => {}
@@ -78,5 +75,8 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mu
                 }
             }
         }
+        
+        // Small delay to prevent excessive CPU usage when no events
+        tokio::time::sleep(tokio::time::Duration::from_millis(16)).await; // ~60fps
     }
 }

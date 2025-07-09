@@ -3,6 +3,7 @@ use tui_textarea::TextArea;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use tokio::sync::mpsc;
+use nostr_mls::prelude::*;
 
 pub enum AppResult {
     Continue,
@@ -36,15 +37,16 @@ impl ConnectionStatus {
 #[derive(Debug, Clone)]
 pub struct Contact {
     pub name: String,
-    pub pubkey: String,
+    pub pubkey: PublicKey,
     pub online: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct Conversation {
     pub id: String,
+    pub group_id: Option<GroupId>,
     pub name: String,
-    pub participants: Vec<String>,
+    pub participants: Vec<PublicKey>,
     pub last_message: Option<String>,
     pub unread_count: usize,
     pub is_group: bool,
@@ -232,8 +234,9 @@ impl App {
                         if !self.conversations.iter().any(|c| c.id == conv_id) {
                             self.conversations.push(Conversation {
                                 id: conv_id.clone(),
+                                group_id: Some(GroupId::from_slice(&hex::decode("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef").unwrap())),
                                 name: contact.name.clone(),
-                                participants: vec![contact.name.clone()],
+                                participants: vec![contact.pubkey],
                                 last_message: None,
                                 unread_count: 0,
                                 is_group: false,
@@ -276,7 +279,14 @@ impl App {
                         let group_indicator = if conv.is_group { "[GROUP] " } else { "" };
                         self.add_message(&format!("  {}: {}{}{}{}", i + 1, group_indicator, conv.name, unread, active));
                         if conv.is_group && !conv.participants.is_empty() {
-                            self.add_message(&format!("      Participants: {}", conv.participants.join(", ")));
+                            let participant_names: Vec<String> = conv.participants.iter().map(|pk| {
+                                // Try to find the name for this public key, otherwise use a short hex representation
+                                self.contacts.iter()
+                                    .find(|c| c.pubkey == *pk)
+                                    .map(|c| c.name.clone())
+                                    .unwrap_or_else(|| format!("{}", pk.to_bech32().unwrap_or_else(|_| pk.to_hex()[..8].to_string())))
+                            }).collect();
+                            self.add_message(&format!("      Participants: {}", participant_names.join(", ")));
                         }
                         if let Some(ref last_msg) = conv.last_message {
                             self.add_message(&format!("      Last: {}", last_msg));
@@ -297,7 +307,8 @@ impl App {
                     let contacts = self.contacts.clone();
                     for (i, contact) in contacts.iter().enumerate() {
                         let status = if contact.online { "online" } else { "offline" };
-                        self.add_message(&format!("  {}: {} ({}) - {}", i + 1, contact.name, status, contact.pubkey));
+                        let pubkey_display = contact.pubkey.to_bech32().unwrap_or_else(|_| contact.pubkey.to_hex()[..16].to_string());
+                        self.add_message(&format!("  {}: {} ({}) - {}", i + 1, contact.name, status, pubkey_display));
                     }
                     self.add_message("");
                 }
@@ -314,6 +325,16 @@ impl App {
                 self.add_message(&format!("  Working directory: {}", std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| "unknown".to_string())));
                 self.add_message(&format!("  Connection status: {:?}", self.connection_status));
                 self.add_message(&format!("  Active conversation: {}", self.active_conversation.as_ref().unwrap_or(&"None".to_string())));
+                
+                // Show active conversation group ID if available
+                if let Some(ref active_id) = self.active_conversation {
+                    if let Some(conv) = self.conversations.iter().find(|c| c.id == *active_id) {
+                        if let Some(ref group_id) = conv.group_id {
+                            self.add_message(&format!("  Active group ID: {}", hex::encode(group_id.as_slice())));
+                        }
+                    }
+                }
+                
                 self.add_message(&format!("  Contacts: {}", self.contacts.len()));
                 self.add_message(&format!("  Conversations: {}", self.conversations.len()));
                 self.add_message(&format!("  Pending invites: {}", self.pending_invites));
@@ -401,7 +422,7 @@ impl App {
         }
     }
 
-    pub fn check_delayed_messages(&mut self) {
+    pub fn check_delayed_messages(&mut self) -> bool {
         let mut messages = Vec::new();
         if let Some(ref mut rx) = self.delayed_message_rx {
             while let Ok(message) = rx.try_recv() {
@@ -409,9 +430,11 @@ impl App {
             }
         }
         // Add all the messages after we're done with the receiver
+        let had_messages = !messages.is_empty();
         for message in messages {
             self.add_message(&message);
         }
+        had_messages
     }
 
     fn send_delayed_message(&self, message: String, delay_ms: u64) {
@@ -472,49 +495,63 @@ impl App {
     }
 
     fn setup_fake_data(&mut self) {
-        // Add fake contacts
+        // Generate real keys for mock data
+        let alice_key = Keys::generate().public_key();
+        let bob_key = Keys::generate().public_key();
+        let charlie_key = Keys::generate().public_key();
+        let diana_key = Keys::generate().public_key();
+        
+        // Add fake contacts with real keys
         self.contacts.push(Contact {
             name: "Alice".to_string(),
-            pubkey: "npub1alice123456789abcdef...".to_string(),
+            pubkey: alice_key,
             online: true,
         });
         self.contacts.push(Contact {
             name: "Bob".to_string(),
-            pubkey: "npub1bob123456789abcdef...".to_string(),
+            pubkey: bob_key,
             online: false,
         });
         self.contacts.push(Contact {
             name: "Charlie".to_string(),
-            pubkey: "npub1charlie123456789abcdef...".to_string(),
+            pubkey: charlie_key,
             online: true,
         });
         self.contacts.push(Contact {
             name: "Diana".to_string(),
-            pubkey: "npub1diana123456789abcdef...".to_string(),
+            pubkey: diana_key,
             online: true,
         });
 
-        // Add fake conversations
+        // Generate real group IDs for mock conversations
+        let alice_group_id = GroupId::from_slice(&hex::decode("1111111111111111111111111111111111111111111111111111111111111111").unwrap());
+        let dev_group_id = GroupId::from_slice(&hex::decode("2222222222222222222222222222222222222222222222222222222222222222").unwrap());
+        let charlie_group_id = GroupId::from_slice(&hex::decode("3333333333333333333333333333333333333333333333333333333333333333").unwrap());
+
+        // Add fake conversations with real group IDs
         self.conversations.push(Conversation {
             id: "conv-alice".to_string(),
+            group_id: Some(alice_group_id),
             name: "Alice".to_string(),
-            participants: vec!["Alice".to_string()],
+            participants: vec![alice_key],
             last_message: Some("Hey! How's it going?".to_string()),
             unread_count: 2,
             is_group: false,
         });
         self.conversations.push(Conversation {
             id: "conv-group-dev".to_string(),
+            group_id: Some(dev_group_id),
             name: "Development Team".to_string(),
-            participants: vec!["Alice".to_string(), "Bob".to_string(), "Charlie".to_string()],
+            participants: vec![alice_key, bob_key, charlie_key],
             last_message: Some("Alice: Let's sync up tomorrow".to_string()),
             unread_count: 0,
             is_group: true,
         });
         self.conversations.push(Conversation {
             id: "conv-charlie".to_string(),
+            group_id: Some(charlie_group_id),
             name: "Charlie".to_string(),
-            participants: vec!["Charlie".to_string()],
+            participants: vec![charlie_key],
             last_message: Some("Thanks for the help earlier!".to_string()),
             unread_count: 1,
             is_group: false,
