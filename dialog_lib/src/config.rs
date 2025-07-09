@@ -8,7 +8,7 @@ pub struct DialogConfig {
 impl Default for DialogConfig {
     fn default() -> Self {
         Self {
-            relay_url: "ws://localhost:8080".to_string(),
+            relay_url: "ws://localhost:10547".to_string(),
         }
     }
 }
@@ -20,7 +20,7 @@ impl DialogConfig {
 
     pub fn from_env() -> Self {
         let relay_url = env::var("DIALOG_RELAY_URL")
-            .unwrap_or_else(|_| "ws://localhost:8080".to_string());
+            .unwrap_or_else(|_| "ws://localhost:10547".to_string());
 
         Self {
             relay_url,
@@ -42,7 +42,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = DialogConfig::default();
-        assert_eq!(config.relay_url, "ws://localhost:8080");
+        assert_eq!(config.relay_url, "ws://localhost:10547");
     }
 
     #[test]

@@ -1,7 +1,8 @@
-use crate::types::{Contact, Conversation, ConnectionStatus};
+use crate::types::{Contact, Conversation, ConnectionStatus, Profile, InviteListResult, MessageFetchResult, UiUpdate};
 use crate::errors::Result;
 use nostr_mls::prelude::*;
 use std::any::Any;
+use tokio::sync::mpsc;
 
 #[async_trait::async_trait]
 pub trait MlsService: Send + Sync + std::fmt::Debug {
@@ -17,4 +18,19 @@ pub trait MlsService: Send + Sync + std::fmt::Debug {
     async fn get_pending_invites_count(&self) -> Result<usize>;
     async fn toggle_connection(&self) -> Result<ConnectionStatus>;
     async fn get_own_pubkey(&self) -> Result<PublicKey>;
+    async fn load_profile(&self, pubkey: &PublicKey) -> Result<Option<Profile>>;
+    async fn publish_profile(&self, profile: &Profile) -> Result<()>;
+    async fn get_relay_url(&self) -> Result<String>;
+    
+    // New methods for group lifecycle
+    async fn publish_key_packages(&self) -> Result<()>;
+    async fn list_pending_invites(&self) -> Result<InviteListResult>;
+    async fn accept_invite(&self, group_id: &str) -> Result<()>;
+    async fn fetch_and_process_group_events(&self, group_id: &GroupId) -> Result<()>;
+    
+    // Message fetching
+    async fn fetch_messages(&self, group_id: &GroupId) -> Result<MessageFetchResult>;
+    
+    // Real-time message subscription
+    async fn subscribe_to_groups(&self, ui_sender: mpsc::Sender<UiUpdate>) -> Result<()>;
 }

@@ -127,4 +127,65 @@ impl DialogLib {
     pub async fn get_own_pubkey(&self) -> Result<PublicKey> {
         self.service.get_own_pubkey().await
     }
+    
+    /// Load a user's profile from the relay
+    pub async fn load_profile(&self, pubkey: &PublicKey) -> Result<Option<Profile>> {
+        self.service.load_profile(pubkey).await
+    }
+    
+    /// Publish our profile to the relay
+    pub async fn publish_profile(&self, profile: &Profile) -> Result<()> {
+        self.service.publish_profile(profile).await
+    }
+    
+    /// Publish a simple profile with just a display name
+    pub async fn publish_simple_profile(&self, name: &str) -> Result<()> {
+        let profile = Profile::with_name(name);
+        self.service.publish_profile(&profile).await
+    }
+    
+    /// Connect to the relay
+    pub async fn connect(&self) -> Result<()> {
+        // We need to access the concrete RealMlsService, not the trait
+        if let Some(real_service) = self.service.as_any().downcast_ref::<RealMlsService>() {
+            real_service.connect().await
+        } else {
+            Err(DialogError::General("Service does not support connection".into()))
+        }
+    }
+    
+    /// Get the relay URL
+    pub async fn get_relay_url(&self) -> Result<String> {
+        self.service.get_relay_url().await
+    }
+
+    /// Publish key packages to the relay
+    pub async fn publish_key_packages(&self) -> Result<()> {
+        self.service.publish_key_packages().await
+    }
+
+    /// List pending group invites
+    pub async fn list_pending_invites(&self) -> Result<InviteListResult> {
+        self.service.list_pending_invites().await
+    }
+
+    /// Accept a group invite
+    pub async fn accept_invite(&self, group_id: &str) -> Result<()> {
+        self.service.accept_invite(group_id).await
+    }
+
+    /// Fetch and process group events (for synchronization)
+    pub async fn fetch_and_process_group_events(&self, group_id: &GroupId) -> Result<()> {
+        self.service.fetch_and_process_group_events(group_id).await
+    }
+
+    /// Fetch messages for a conversation
+    pub async fn fetch_messages(&self, group_id: &GroupId) -> Result<MessageFetchResult> {
+        self.service.fetch_messages(group_id).await
+    }
+
+    /// Subscribe to real-time updates for all groups
+    pub async fn subscribe_to_groups(&self, ui_sender: tokio::sync::mpsc::Sender<UiUpdate>) -> Result<()> {
+        self.service.subscribe_to_groups(ui_sender).await
+    }
 }

@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tui_textarea::TextArea;
 use tokio::sync::mpsc;
-use dialog_lib::{DialogLib, Contact, Conversation, ConnectionStatus, AppMode, AppResult, ToBech32, hex, GroupId};
+use dialog_lib::{DialogLib, Contact, Conversation, ConnectionStatus, AppMode, AppResult, ToBech32, hex, GroupId, UiUpdate};
 use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
 
 #[derive(Debug, Clone)]
@@ -33,6 +33,9 @@ pub struct App {
     pub is_searching: bool,
     pub search_query: String,
     pub search_start_pos: usize,
+    
+    // Real-time update receiver
+    pub ui_update_rx: Option<mpsc::Receiver<UiUpdate>>,
 }
 
 impl App {
@@ -44,12 +47,17 @@ impl App {
         // Create async message channel for delayed responses
         let (delayed_tx, delayed_rx) = mpsc::unbounded_channel();
 
+        // Create channel for UI updates
+        let (ui_update_tx, ui_update_rx) = mpsc::channel(100);
+
         // Get initial data from the real service
         let contacts = dialog_lib.get_contacts().await.unwrap_or_default();
         let conversations = dialog_lib.get_conversations().await.unwrap_or_default();
         let connection_status = dialog_lib.get_connection_status().await.unwrap_or(ConnectionStatus::Disconnected);
         let pending_invites = dialog_lib.get_pending_invites_count().await.unwrap_or(0);
         let active_conversation = dialog_lib.get_active_conversation().await.unwrap_or(None);
+
+        // Don't auto-start subscription - let user connect manually
 
         let mut app = Self {
             mode: AppMode::Normal,
@@ -72,11 +80,15 @@ impl App {
             is_searching: false,
             search_query: String::new(),
             search_start_pos: 0,
+            
+            // Real-time updates
+            ui_update_rx: Some(ui_update_rx),
         };
 
         // Add welcome messages
         app.add_message("* Welcome to Dialog!");
         app.add_message("");
+        app.add_message("⚡ Use /connect to connect to the relay");
         app.add_message("/help for help, /status for your current setup");
         app.add_message("");
         app.add_message(&format!("cwd: {}", std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| "unknown".to_string())));
@@ -359,14 +371,20 @@ impl App {
                 self.add_message("/quit - Exit the application");
                 self.add_message("/status - Show current setup and stats");
                 self.add_message("/connect - Toggle connection status");
-                self.add_message("/add <pubkey|nip05> - Add a new contact");
-                self.add_message("/new - Start a new conversation");
+                self.add_message("/pk - Show your public key");
+                self.add_message("");
+                self.add_message("Contacts & Groups:");
+                self.add_message("/add <pubkey> - Add a new contact");
+                self.add_message("/contacts - List all contacts");
+                self.add_message("/keypackage - Publish your key package (required for receiving invites)");
+                self.add_message("/create <name> <contact1> [contact2]... - Create a group");
+                self.add_message("/invites - View pending group invitations");
+                self.add_message("/accept <group_id> - Accept a group invitation");
+                self.add_message("");
+                self.add_message("Conversations:");
                 self.add_message("/conversations - List active conversations");
                 self.add_message("/switch <number> - Switch to a conversation");
-                self.add_message("/contacts - List all contacts");
-                self.add_message("/invites - View pending invitations");
-                self.add_message("/keypackage - Publish your key package");
-                self.add_message("/pk - Show your public key");
+                self.add_message("/fetch - Fetch and display messages in the active conversation");
                 self.add_message("");
                 self.add_message("Features:");
                 self.add_message("  @ search - Type '@' followed by contact name for fuzzy search");
@@ -382,36 +400,94 @@ impl App {
             "/add" => {
                 if parts.len() > 1 {
                     let contact = parts[1];
-                    if let Err(e) = self.dialog_lib.add_contact(contact).await {
-                        self.add_message(&format!("Error adding contact: {}", e));
-                    } else {
-                        self.add_message(&format!("Adding contact: {}", contact));
-                        self.refresh_data().await;
+                    
+                    // Check and warn user about profile loading if not connected
+                    match self.dialog_lib.get_connection_status().await {
+                        Ok(status) => {
+                            if status != ConnectionStatus::Connected {
+                                self.add_message("⚠️  Not connected to relay - profile loading disabled");
+                                self.add_message("Contact names will show as truncated pubkeys");
+                                self.add_message("Use /connect to enable profile loading");
+                                self.add_message("");
+                            }
+                        }
+                        _ => {}
+                    }
+                    
+                    match self.dialog_lib.add_contact(contact).await {
+                        Ok(()) => {
+                            self.add_message(&format!("✅ Contact added: {}", contact));
+                            if self.connection_status == ConnectionStatus::Connected {
+                                self.add_message("Profile loading attempted from relay");
+                            }
+                            self.refresh_data().await;
+                        }
+                        Err(e) => {
+                            self.add_message(&format!("❌ Error adding contact: {}", e));
+                        }
                     }
                 } else {
                     self.add_message("Usage: /add <pubkey|nip05>");
                 }
             }
             "/new" => {
-                if parts.len() > 1 {
-                    let contact_name = parts[1];
-                    if let Some(contact) = self.contacts.iter().find(|c| c.name.to_lowercase() == contact_name.to_lowercase()) {
-                        match self.dialog_lib.create_conversation(&contact.name, vec![contact.pubkey]).await {
-                            Ok(conv_id) => {
-                                self.add_message(&format!("Started new conversation with {}", contact.name));
-                                let _ = self.dialog_lib.switch_conversation(&conv_id).await;
-                                self.refresh_data().await;
-                            }
-                            Err(e) => {
-                                self.add_message(&format!("Error: {}", e));
+                self.add_message("Use /create to create a new group conversation");
+            }
+            "/create" => {
+                if parts.len() > 2 {
+                    let group_name = parts[1];
+                    let contact_names = parts[2..].to_vec();
+                    
+                    // Check if we're connected first
+                    if self.connection_status != ConnectionStatus::Connected {
+                        self.add_message("❌ Cannot create group - not connected to relay");
+                        self.add_message("Use /connect to establish a connection first");
+                        return;
+                    }
+                    
+                    // Collect public keys for all mentioned contacts
+                    let mut participants = Vec::new();
+                    let mut missing_contacts = Vec::new();
+                    
+                    for name in &contact_names {
+                        if let Some(contact) = self.contacts.iter().find(|c| c.name.to_lowercase() == name.to_lowercase()) {
+                            participants.push(contact.pubkey);
+                        } else {
+                            missing_contacts.push(name.as_ref());
+                        }
+                    }
+                    
+                    if !missing_contacts.is_empty() {
+                        self.add_message(&format!("❌ Contacts not found: {}", missing_contacts.join(", ")));
+                        self.add_message("Use /contacts to see available contacts.");
+                        return;
+                    }
+                    
+                    if participants.is_empty() {
+                        self.add_message("❌ No valid participants specified");
+                        return;
+                    }
+                    
+                    self.add_message(&format!("Creating group '{}' with {} participant(s)...", group_name, participants.len()));
+                    match self.dialog_lib.create_conversation(group_name, participants).await {
+                        Ok(group_id) => {
+                            self.add_message(&format!("✅ Group '{}' created successfully!", group_name));
+                            self.add_message(&format!("Group ID: {}", group_id));
+                            self.add_message("Invitations have been sent to all participants.");
+                            self.refresh_data().await;
+                        }
+                        Err(e) => {
+                            self.add_message(&format!("❌ Error creating group: {}", e));
+                            if e.to_string().contains("key package") {
+                                self.add_message("Make sure all participants have published their key packages.");
+                                self.add_message("They can use /keypackage command to publish.");
                             }
                         }
-                    } else {
-                        self.add_message(&format!("Contact '{}' not found. Use /contacts to see available contacts.", contact_name));
                     }
                 } else {
-                    self.add_message("Usage: /new <contact_name>");
-                    self.add_message("Example: /new Alice");
+                    self.add_message("Usage: /create <group_name> <contact1> [contact2] [contact3] ...");
+                    self.add_message("Example: /create \"Coffee Chat\" Alice Bob");
+                    self.add_message("Note: All participants must have published key packages");
                 }
             }
             "/conversations" => {
@@ -477,11 +553,65 @@ impl App {
                 }
             }
             "/invites" => {
-                self.refresh_data().await;
-                self.add_message(&format!("You have {} pending invitations", self.pending_invites));
+                // Check if we're connected first
+                if self.connection_status != ConnectionStatus::Connected {
+                    self.add_message("❌ Cannot fetch invites - not connected to relay");
+                    self.add_message("Use /connect to establish a connection first");
+                    return;
+                }
+                
+                self.add_message("Fetching pending invites...");
+                match self.dialog_lib.list_pending_invites().await {
+                    Ok(result) => {
+                        // First show any processing errors
+                        if !result.processing_errors.is_empty() {
+                            self.add_message("Processing errors encountered:");
+                            for error in &result.processing_errors {
+                                self.add_message(&format!("  {}", error));
+                            }
+                            self.add_message("");
+                        }
+                        
+                        // Then show the invites
+                        if result.invites.is_empty() {
+                            self.add_message("No pending invites found.");
+                        } else {
+                            self.add_message(&format!("You have {} pending invites:", result.invites.len()));
+                            self.add_message("");
+                            for (idx, invite) in result.invites.iter().enumerate() {
+                                self.add_message(&format!("{}. {}", idx + 1, invite.group_name));
+                                self.add_message(&format!("   Group ID: {}", hex::encode(invite.group_id.as_slice())));
+                                self.add_message(&format!("   Members: {}", invite.member_count));
+                                self.add_message("");
+                            }
+                            self.add_message("Use /accept <group_id> to join a group");
+                        }
+                        // Update the pending invites count
+                        self.pending_invites = result.invites.len();
+                    }
+                    Err(e) => {
+                        self.add_message(&format!("❌ Error fetching invites: {}", e));
+                    }
+                }
             }
             "/keypackage" => {
-                self.add_message("Publishing key package (not implemented)");
+                // Check if we're connected first
+                if self.connection_status != ConnectionStatus::Connected {
+                    self.add_message("❌ Cannot publish key package - not connected to relay");
+                    self.add_message("Use /connect to establish a connection first");
+                    return;
+                }
+                
+                self.add_message("Publishing key package to relay...");
+                match self.dialog_lib.publish_key_packages().await {
+                    Ok(()) => {
+                        self.add_message("✅ Key package published successfully!");
+                        self.add_message("Other users can now invite you to groups.");
+                    }
+                    Err(e) => {
+                        self.add_message(&format!("❌ Error publishing key package: {}", e));
+                    }
+                }
             }
             "/pk" => {
                 match self.dialog_lib.get_own_pubkey().await {
@@ -505,6 +635,13 @@ impl App {
                 self.add_message("Current setup:");
                 self.add_message("");
                 self.add_message(&format!("  Working directory: {}", std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| "unknown".to_string())));
+                
+                // Add relay URL
+                match self.dialog_lib.get_relay_url().await {
+                    Ok(relay_url) => self.add_message(&format!("  Relay URL: {}", relay_url)),
+                    Err(_) => self.add_message("  Relay URL: (error)"),
+                }
+                
                 self.add_message(&format!("  Connection status: {:?}", self.connection_status));
                 self.add_message(&format!("  Active conversation: {}", self.active_conversation.as_ref().unwrap_or(&"None".to_string())));
                 
@@ -538,9 +675,32 @@ impl App {
                 self.add_message("");
             }
             "/connect" => {
-                if let Ok(status) = self.dialog_lib.toggle_connection().await {
-                    self.connection_status = status;
-                    self.add_message(&format!("Connection status changed to: {:?}", self.connection_status));
+                match self.dialog_lib.toggle_connection().await {
+                    Ok(status) => {
+                        self.connection_status = status;
+                        self.add_message(&format!("Connection status changed to: {:?}", self.connection_status));
+                        
+                        // If we just connected, start the subscription for real-time messages
+                        if status == ConnectionStatus::Connected {
+                            // Create new channel for UI updates
+                            let (ui_update_tx, ui_update_rx) = mpsc::channel(100);
+                            self.ui_update_rx = Some(ui_update_rx);
+                            
+                            // Start subscription
+                            if let Err(e) = self.dialog_lib.subscribe_to_groups(ui_update_tx).await {
+                                self.add_message(&format!("⚠️  Failed to start real-time message subscription: {}", e));
+                            } else {
+                                self.add_message("✅ Real-time message updates enabled");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        self.add_message(&format!("Connection failed: {}", e));
+                        // Update to show current status
+                        if let Ok(status) = self.dialog_lib.get_connection_status().await {
+                            self.connection_status = status;
+                        }
+                    }
                 }
             }
             "/switch" => {
@@ -551,21 +711,8 @@ impl App {
                             if let Ok(()) = self.dialog_lib.switch_conversation(&conv.id).await {
                                 self.active_conversation = Some(conv.id.clone());
                                 self.add_message(&format!("Switched to conversation: {}", conv.name));
-                                
-                                // Add some fake conversation history
                                 self.add_message("");
-                                self.add_message("--- Conversation History ---");
-                                if conv.is_group {
-                                    self.add_message("Alice: Hey everyone!");
-                                    self.add_message("Bob: Hi Alice! How's everyone doing?");
-                                    self.add_message("You: Good to see you all!");
-                                } else {
-                                    self.add_message(&format!("{}: Hey there!", conv.name));
-                                    self.add_message("You: Hi! How are you?");
-                                    self.add_message(&format!("{}: I'm doing well, thanks for asking!", conv.name));
-                                }
-                                self.add_message("--- End History ---");
-                                self.add_message("");
+                                self.add_message("Use /fetch to load messages from this conversation");
                             }
                         } else {
                             self.add_message(&format!("Invalid conversation number. Use 1-{}", self.conversations.len()));
@@ -575,6 +722,130 @@ impl App {
                     }
                 } else {
                     self.add_message("Usage: /switch <conversation_number>");
+                }
+            }
+            "/accept" => {
+                if parts.len() > 1 {
+                    let group_id = parts[1];
+                    
+                    // Check if we're connected first
+                    if self.connection_status != ConnectionStatus::Connected {
+                        self.add_message("❌ Cannot accept invite - not connected to relay");
+                        self.add_message("Use /connect to establish a connection first");
+                        return;
+                    }
+                    
+                    self.add_message(&format!("Accepting invite for group {}...", group_id));
+                    match self.dialog_lib.accept_invite(group_id).await {
+                        Ok(()) => {
+                            self.add_message("✅ Successfully joined group!");
+                            self.add_message("The group should now appear in your conversations.");
+                            self.refresh_data().await;
+                        }
+                        Err(e) => {
+                            self.add_message(&format!("❌ Error accepting invite: {}", e));
+                        }
+                    }
+                } else {
+                    self.add_message("Usage: /accept <group_id>");
+                    self.add_message("Get the group ID from /invites command");
+                }
+            }
+            "/dangerously_publish_profile" => {
+                if parts.len() > 1 {
+                    let name = parts[1..].join(" "); // Join all parts after the command as the name
+                    
+                    // Check if we're connected first
+                    if self.connection_status != ConnectionStatus::Connected {
+                        self.add_message("❌ Cannot publish profile - not connected to relay");
+                        self.add_message("Use /connect to establish a connection first");
+                        return;
+                    }
+                    
+                    self.add_message("⚠️  WARNING: This will publish your profile to the relay, making it publicly visible!");
+                    self.add_message(&format!("Publishing profile with name: '{}'", name));
+                    
+                    match self.dialog_lib.publish_simple_profile(&name).await {
+                        Ok(()) => {
+                            self.add_message("✅ Profile published successfully!");
+                            self.add_message("Your name is now visible to other users when they add you as a contact.");
+                        }
+                        Err(e) => {
+                            self.add_message(&format!("❌ Error publishing profile: {}", e));
+                            self.add_message("This could be due to:");
+                            self.add_message("  - Relay connection issues");
+                            self.add_message("  - Network problems");
+                            self.add_message("  - Relay not accepting events");
+                        }
+                    }
+                } else {
+                    self.add_message("Usage: /dangerously_publish_profile <your_name>");
+                    self.add_message("Example: /dangerously_publish_profile Alice");
+                    self.add_message("⚠️  WARNING: This makes your name publicly visible on the relay!");
+                }
+            }
+            "/fetch" => {
+                // Check if we're connected first
+                if self.connection_status != ConnectionStatus::Connected {
+                    self.add_message("❌ Cannot fetch messages - not connected to relay");
+                    self.add_message("Use /connect to establish a connection first");
+                    return;
+                }
+                
+                if let Some(ref active_id) = self.active_conversation {
+                    if let Some(conv) = self.conversations.iter().find(|c| c.id == *active_id).cloned() {
+                        self.add_message("Fetching messages...");
+                        
+                        if let Ok(bytes) = hex::decode(&conv.id) {
+                            let group_id = GroupId::from_slice(&bytes);
+                            match self.dialog_lib.fetch_messages(&group_id).await {
+                                Ok(result) => {
+                                    // First show any processing errors
+                                    if !result.processing_errors.is_empty() {
+                                        self.add_message("Processing errors encountered:");
+                                        for error in &result.processing_errors {
+                                            self.add_message(&format!("  {}", error));
+                                        }
+                                        self.add_message("");
+                                    }
+                                    
+                                    // Then show the messages
+                                    if result.messages.is_empty() {
+                                        self.add_message("No messages in this conversation yet.");
+                                    } else {
+                                        self.add_message(&format!("Fetched {} messages:", result.messages.len()));
+                                        self.add_message("");
+                                        
+                                        for msg in result.messages {
+                                            // Get sender name from contacts or use truncated pubkey
+                                            let own_pubkey = self.dialog_lib.get_own_pubkey().await.ok();
+                                            let sender_name = if own_pubkey.as_ref() == Some(&msg.sender) {
+                                                "You".to_string()
+                                            } else if let Some(contact) = self.contacts.iter().find(|c| c.pubkey == msg.sender) {
+                                                contact.name.clone()
+                                            } else {
+                                                format!("{}...", &msg.sender.to_hex()[0..8])
+                                            };
+                                            
+                                            self.add_message(&format!("{}: {}", sender_name, msg.content));
+                                        }
+                                        
+                                        self.add_message("");
+                                        self.add_message("--- End of messages ---");
+                                    }
+                                }
+                                Err(e) => {
+                                    self.add_message(&format!("❌ Error fetching messages: {}", e));
+                                }
+                            }
+                        } else {
+                            self.add_message("Error: Invalid conversation ID format");
+                        }
+                    } else {
+                        self.add_message("Error: Active conversation not found.");
+                    }
+                } else {
+                    self.add_message("No active conversation. Use /switch to select a conversation first.");
                 }
             }
             _ => {
@@ -612,7 +883,43 @@ impl App {
     }
 
     pub fn add_message(&mut self, message: &str) {
-        self.messages.push(message.to_string());
+        // Wrap long messages to fit in terminal (leaving some margin for UI elements)
+        let max_width = 120; // Conservative width that should work on most terminals
+        
+        if message.len() <= max_width {
+            self.messages.push(message.to_string());
+        } else {
+            // Split long messages into multiple lines
+            let words: Vec<&str> = message.split_whitespace().collect();
+            let mut current_line = String::new();
+            let mut lines = Vec::new();
+            
+            for word in words {
+                if current_line.is_empty() {
+                    current_line = word.to_string();
+                } else if current_line.len() + 1 + word.len() <= max_width {
+                    current_line.push(' ');
+                    current_line.push_str(word);
+                } else {
+                    lines.push(current_line);
+                    current_line = word.to_string();
+                }
+            }
+            
+            if !current_line.is_empty() {
+                lines.push(current_line);
+            }
+            
+            // Add continuation marker for wrapped lines
+            for (i, line) in lines.into_iter().enumerate() {
+                if i == 0 {
+                    self.messages.push(line);
+                } else {
+                    self.messages.push(format!("  {}", line)); // Indent continuation lines
+                }
+            }
+        }
+        
         // Auto-scroll to bottom when new message is added
         if self.messages.len() > 0 {
             self.scroll_offset = self.messages.len().saturating_sub(1);
@@ -644,6 +951,62 @@ impl App {
             self.add_message(&message);
         }
         had_messages
+    }
+
+    pub async fn check_ui_updates(&mut self) -> bool {
+        let mut had_updates = false;
+        let mut updates = Vec::new();
+        
+        if let Some(ref mut rx) = self.ui_update_rx {
+            while let Ok(update) = rx.try_recv() {
+                updates.push(update);
+                had_updates = true;
+            }
+        }
+        
+        // Process updates after we're done with the receiver
+        for update in updates {
+            match update {
+                UiUpdate::NewMessage { group_id, message } => {
+                    // Check if this message is for the active conversation
+                    if let Some(ref active_id) = self.active_conversation {
+                        if let Some(conv) = self.conversations.iter().find(|c| c.id == *active_id) {
+                            if let Some(ref conv_group_id) = conv.group_id {
+                                if conv_group_id == &group_id {
+                                    // Get sender name
+                                    let own_pubkey = self.dialog_lib.get_own_pubkey().await.ok();
+                                    let sender_name = if own_pubkey.as_ref() == Some(&message.sender) {
+                                        "You".to_string()
+                                    } else if let Some(contact) = self.contacts.iter().find(|c| c.pubkey == message.sender) {
+                                        contact.name.clone()
+                                    } else {
+                                        format!("{}...", &message.sender.to_hex()[0..8])
+                                    };
+                                    
+                                    // Add the message to the display
+                                    self.add_message(&format!("{}: {}", sender_name, message.content));
+                                }
+                            }
+                        }
+                    }
+                }
+                UiUpdate::NewInvite(_invite) => {
+                    // Update pending invite count
+                    if let Ok(count) = self.dialog_lib.get_pending_invites_count().await {
+                        self.pending_invites = count;
+                        self.add_message("📨 New group invitation received! Use /invites to view.");
+                    }
+                }
+                UiUpdate::ConnectionStatus(status) => {
+                    self.connection_status = status;
+                }
+                UiUpdate::GroupStateChange { .. } => {
+                    // Could refresh conversations here if needed
+                }
+            }
+        }
+        
+        had_updates
     }
 
     fn send_delayed_message(&self, message: String, delay_ms: u64) {
