@@ -465,6 +465,205 @@ pub enum SubCommandMode {
 | `/clear` | Clear conversation | None | None | Clears current chat view |
 | `/quit` | Exit application | None | ConfirmAction | Shows confirmation before exit |
 
+### Quick Navigation Commands
+
+| Command | Description | Arguments | Sub-Command Mode | Behavior |
+|---------|-------------|-----------|-----------------|----------|
+| `@<query>` | Quick conversation search | `<partial_name>` | SearchableList | Claude-style @ search for conversations with fuzzy matching |
+
+## @ Command System (Claude-Style Quick Navigation)
+
+### Overview
+The `@` command system provides instant, fuzzy-search conversation switching inspired by Claude Code's navigation. Users can quickly jump to any conversation by typing `@` followed by partial text that matches conversation names or canonical identifiers.
+
+### User Experience
+```
+> @al█
+┌─────────────────────────────────────────────────────────────┐
+│ @al                                                         │
+├─────────────────────────────────────────────────────────────┤
+│ Switch to Conversation                                      │
+│ Search conversations by name or alias                       │
+│                                                             │
+│ ❯ Alice                      Last: Hey! How's it going?    │
+│   Alice & Bob Group          Last: Meeting at 3pm          │
+│                                                             │
+│                                                             │
+│                                                             │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Canonical Names
+Each conversation has a canonical short name for @ search:
+
+**Direct Messages**: 
+- Use contact's first name (lowercased): `alice`, `bob`, `charlie`
+- Fallback to contact display name if no first name
+
+**Group Conversations**:
+- User-settable canonical names: `dev`, `team`, `work`, `family`
+- Auto-generated from group name: `Development Team` → `dev` or `development`
+- Settable via `/alias <conversation> <canonical_name>` command
+
+### Search Algorithm
+**Fuzzy Matching Priority**:
+1. **Exact canonical name match**: `@dev` → "Development Team"
+2. **Prefix match on canonical name**: `@de` → "Development Team" 
+3. **Prefix match on full name**: `@alice` → "Alice Thompson"
+4. **Contains match on full name**: `@team` → "Development Team"
+5. **Fuzzy character match**: `@alt` → "Alice Thompson" (a-l-t matches)
+
+### Implementation Details
+
+#### Conversation Model Updates
+```rust
+#[derive(Debug, Clone)]
+pub struct Conversation {
+    pub id: String,
+    pub group_id: Option<GroupId>,
+    pub name: String,                    // Display name
+    pub canonical_name: String,          // Short searchable name
+    pub aliases: Vec<String>,            // Additional search terms
+    pub participants: Vec<PublicKey>,
+    pub last_message: Option<String>,
+    pub unread_count: usize,
+    pub is_group: bool,
+}
+
+impl Conversation {
+    pub fn search_score(&self, query: &str) -> Option<u32> {
+        let query = query.to_lowercase();
+        
+        // Exact canonical name match (highest priority)
+        if self.canonical_name == query { return Some(1000); }
+        
+        // Prefix matches
+        if self.canonical_name.starts_with(&query) { return Some(900); }
+        if self.name.to_lowercase().starts_with(&query) { return Some(800); }
+        
+        // Check aliases
+        for alias in &self.aliases {
+            if alias == &query { return Some(950); }
+            if alias.starts_with(&query) { return Some(850); }
+        }
+        
+        // Contains matches
+        if self.name.to_lowercase().contains(&query) { return Some(700); }
+        
+        // Fuzzy character matching
+        if fuzzy_match(&self.canonical_name, &query) { return Some(600); }
+        if fuzzy_match(&self.name.to_lowercase(), &query) { return Some(500); }
+        
+        None
+    }
+}
+```
+
+#### Input Mode Detection
+```rust
+pub enum InputMode {
+    Normal,
+    Command(CommandInput),
+    Message(MessageInput),
+    Search(SearchInput),
+    AtSearch(AtSearchInput),    // New @ search mode
+}
+
+pub struct AtSearchInput {
+    query: String,
+    filtered_conversations: Vec<(usize, u32)>, // (index, score)
+    selected_index: usize,
+}
+```
+
+#### @ Search UI Component
+```rust
+pub struct AtSearchComponent {
+    query: String,
+    conversations: Vec<Conversation>,
+    filtered_results: Vec<(usize, u32)>,  // (conversation_index, score)
+    selected_index: usize,
+    max_results: usize,
+}
+
+impl AtSearchComponent {
+    pub fn update_search(&mut self, query: &str) {
+        self.query = query.to_string();
+        
+        let mut results: Vec<(usize, u32)> = self.conversations
+            .iter()
+            .enumerate()
+            .filter_map(|(i, conv)| {
+                conv.search_score(query).map(|score| (i, score))
+            })
+            .collect();
+        
+        // Sort by score (descending) then by name
+        results.sort_by(|a, b| {
+            b.1.cmp(&a.1).then_with(|| {
+                self.conversations[a.0].name.cmp(&self.conversations[b.0].name)
+            })
+        });
+        
+        results.truncate(self.max_results);
+        self.filtered_results = results;
+        self.selected_index = 0;
+    }
+}
+```
+
+### New Commands
+
+#### `/alias` Command
+```
+/alias <conversation_number|name> <canonical_name>
+```
+**Purpose**: Set custom canonical names for conversations
+**Examples**:
+- `/alias 2 dev` - Set "Development Team" conversation to be searchable as `@dev`
+- `/alias alice work` - Set Alice conversation to be searchable as `@work`
+
+#### Automatic Canonical Name Generation
+**For Direct Messages**:
+- Extract first name from contact: "Alice Thompson" → `alice`
+- Use full name if single word: "Bob" → `bob`
+- Fallback to pubkey prefix if no name
+
+**For Groups**:
+- Extract meaningful words: "Development Team" → `dev`, `development`, `team`
+- Use first word by default: "Development Team" → `dev`
+- User can override with `/alias`
+
+### Key Bindings
+
+#### @ Search Mode
+- `@<text>`: Enter @ search mode, filter conversations
+- `Up/Down`: Navigate filtered results
+- `Enter`: Switch to selected conversation and exit @ search
+- `Esc`: Exit @ search mode without switching
+- `Backspace`: Modify search query
+- `C-c`: Exit @ search mode
+
+### Integration with Existing Commands
+The @ search integrates seamlessly with existing functionality:
+- After `@alice` + Enter, user is in message mode for Alice conversation
+- Status bar updates to show active conversation
+- All existing `/switch`, `/conversations` commands still work
+- @ search provides faster alternative to `/conversations` browsing
+
+### Performance Considerations
+- Search operates on in-memory conversation list (fast)
+- Fuzzy matching limited to reasonable conversation counts (<100)
+- Results limited to top 10 matches for UI performance
+- Real-time filtering as user types (no search delay)
+
+### Future Enhancements
+1. **Recent Conversations**: Boost score for recently active conversations
+2. **Frequency Weighting**: Learn from user behavior to improve ranking
+3. **Alias Auto-completion**: Suggest canonical names based on conversation content
+4. **Global Aliases**: System-wide aliases that persist across restarts
+
 ## UI Components
 
 ### 1. Input Component
@@ -935,6 +1134,57 @@ impl App {
 
 This phased approach ensures immediate code quality improvements while laying groundwork for realistic MLS integration.
 
+## NEXT STEPS - Ready for Implementation
+
+### **Phase 5: Quick Navigation (@ Commands) - READY TO START**
+
+#### **Current Status:**
+✅ **Phase 1-4 Complete** - Core foundation is solid:
+- UI update bug fixed (delayed messages appear automatically)
+- Nostr-MLS type adoption complete (real PublicKey and GroupId types)
+- Conversation switching works perfectly on startup
+- Real cryptographic identifiers properly displayed
+
+#### **Next Implementation: Claude-Style @ Commands**
+🎯 **Goal**: Add instant conversation switching with `@alice`, `@dev`, etc.
+
+**Ready to implement:**
+1. **Conversation Model Updates** - Add canonical_name and aliases fields
+2. **Fuzzy Search Algorithm** - Implement scoring and matching logic  
+3. **@ Search UI Component** - Real-time filtering with highlighting
+4. **Input Mode Detection** - Handle @ vs / vs regular message input
+5. **Auto-generated Names** - Extract canonical names from existing conversations
+
+#### **Example User Flow:**
+```bash
+# User types @ and immediately sees search UI
+> @al█
+
+# Shows filtered results:
+❯ Alice                      Last: Hey! How's it going?
+  Alice & Bob Group          Last: Meeting at 3pm  
+
+# User presses Enter, immediately switches to Alice conversation
+# Status bar updates: "Talking to Alice"
+# Ready to send messages
+```
+
+#### **Implementation Benefits:**
+- **10x Faster Navigation**: `@alice` vs `/conversations` → find Alice → `/switch 1`
+- **Muscle Memory**: Matches Claude Code's @ navigation pattern
+- **Fuzzy Search**: `@al`, `@dev`, `@team` all work intuitively
+- **No Context Switching**: Stay in flow, no UI mode changes
+- **Discoverable**: Shows available conversations as you type
+
+#### **Files to Modify:**
+- `dialog_lib/src/types.rs` - Add canonical_name and aliases to Conversation
+- `dialog_lib/src/mock_service.rs` - Generate canonical names for mock data
+- `dialog_tui/src/app.rs` - Add @ input mode and search logic
+- `dialog_tui/src/ui.rs` - Add @ search UI component rendering
+- Add fuzzy search scoring algorithm with proper weighting
+
+This phase will dramatically improve navigation UX and bring Dialog TUI closer to Claude Code's excellent navigation experience.
+
 ## Implementation Phases
 
 ### Phase 1: Core UI Foundation (MVP)
@@ -966,14 +1216,22 @@ This phased approach ensures immediate code quality improvements while laying gr
 4. `/new` command flow
 5. Mock conversations
 
-### Phase 5: Advanced Features
+### Phase 5: Quick Navigation (@ Commands)
+1. Add canonical_name and aliases fields to Conversation model
+2. Implement fuzzy search scoring algorithm
+3. Create @ search UI component with real-time filtering
+4. Add @ input mode detection and handling
+5. Implement `/alias` command for custom conversation names
+6. Auto-generate canonical names for existing conversations
+
+### Phase 6: Advanced Features
 1. `/invites` management
 2. `/keypackage` stubbed flow
 3. Notifications
 4. Multi-select UI
 5. Settings/configuration
 
-### Phase 6: Polish
+### Phase 7: Polish
 1. Animations/transitions
 2. Performance optimization
 3. Comprehensive keyboard shortcuts

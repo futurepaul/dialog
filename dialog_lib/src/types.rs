@@ -7,7 +7,7 @@ pub enum AppMode {
     CommandInput,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ConnectionStatus {
     Connected,
     Connecting,

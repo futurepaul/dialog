@@ -1,17 +1,15 @@
 pub mod types;
 pub mod errors;
 pub mod service;
-pub mod mock_service;
-pub mod real_service;
+pub mod mls_service;
 pub mod config;
 
 // Re-export commonly used types
 pub use types::*;
 pub use errors::*;
 pub use service::MlsService;
-pub use mock_service::MockMlsService;
-pub use real_service::RealMlsService;
-pub use config::{DialogConfig, ServiceMode};
+pub use mls_service::RealMlsService;
+pub use config::DialogConfig;
 
 // Re-export Nostr-MLS types to eliminate direct dependencies in UIs
 pub use nostr_mls::prelude::{
@@ -33,74 +31,40 @@ pub struct DialogLib {
 }
 
 impl DialogLib {
-    /// Create a new DialogLib instance with mock service
-    pub fn new_mock() -> Self {
-        Self {
-            service: Arc::new(MockMlsService::new()),
-        }
-    }
-    
-    /// Create a new DialogLib instance with mock service and pre-loaded data
-    pub async fn new_mock_with_data() -> Self {
-        Self {
-            service: Arc::new(MockMlsService::new_with_data().await),
-        }
-    }
-    
-    /// Create a new DialogLib instance with a custom service
-    pub fn new_with_service(service: Arc<dyn MlsService>) -> Self {
-        Self { service }
-    }
-    
-    /// Create a new DialogLib instance based on configuration
-    pub async fn from_config(config: DialogConfig) -> Result<Self> {
-        match config.mode {
-            ServiceMode::Mock => Ok(Self::new_mock_with_data().await),
-            ServiceMode::Real => {
-                // Generate keys for this instance
-                let keys = nostr_mls::prelude::Keys::generate();
-                
-                let service: Arc<dyn MlsService> = Arc::new(
-                    RealMlsService::new(keys, config.relay_url).await?
-                );
-                
-                Ok(Self::new_with_service(service))
-            }
-        }
-    }
-    
-    /// Create a new DialogLib instance from environment variables
-    pub async fn from_env() -> Result<Self> {
-        let config = DialogConfig::from_env();
-        Self::from_config(config).await
-    }
-    
     /// Create a new DialogLib instance with generated keys
     pub async fn new() -> Result<Self> {
-        let config = DialogConfig::builder()
-            .mode(ServiceMode::Real)
-            .build();
-        Self::from_config(config).await
+        let keys = nostr_mls::prelude::Keys::generate();
+        let config = DialogConfig::new();
+        let service: Arc<dyn MlsService> = Arc::new(
+            RealMlsService::new(keys, config.relay_url).await?
+        );
+        Ok(Self { service })
     }
     
     /// Create a new DialogLib instance with specific keys
     pub async fn new_with_keys(keys: nostr_mls::prelude::Keys) -> Result<Self> {
+        let config = DialogConfig::new();
         let service: Arc<dyn MlsService> = Arc::new(
-            RealMlsService::new(keys, "ws://localhost:8080".to_string()).await?
+            RealMlsService::new(keys, config.relay_url).await?
         );
-        Ok(Self::new_with_service(service))
+        Ok(Self { service })
     }
     
-    /// Create a new DialogLib instance with custom configuration
-    pub async fn new_with_config(
-        mode: ServiceMode,
-        relay_url: impl Into<String>,
-    ) -> Result<Self> {
-        let config = DialogConfig::builder()
-            .mode(mode)
-            .relay_url(relay_url)
-            .build();
-        Self::from_config(config).await
+    /// Create a new DialogLib instance with custom relay URL
+    pub async fn new_with_relay(relay_url: impl Into<String>) -> Result<Self> {
+        let keys = nostr_mls::prelude::Keys::generate();
+        let service: Arc<dyn MlsService> = Arc::new(
+            RealMlsService::new(keys, relay_url.into()).await?
+        );
+        Ok(Self { service })
+    }
+    
+    /// Create a new DialogLib instance with specific keys and relay URL
+    pub async fn new_with_keys_and_relay(keys: nostr_mls::prelude::Keys, relay_url: impl Into<String>) -> Result<Self> {
+        let service: Arc<dyn MlsService> = Arc::new(
+            RealMlsService::new(keys, relay_url.into()).await?
+        );
+        Ok(Self { service })
     }
     
     /// Get all contacts
@@ -158,10 +122,6 @@ impl DialogLib {
         &self.service
     }
     
-    /// Get access to the mock service (if using mock implementation)
-    pub fn mock_service(&self) -> Option<&MockMlsService> {
-        self.service.as_any().downcast_ref::<MockMlsService>()
-    }
     
     /// Get the user's own public key
     pub async fn get_own_pubkey(&self) -> Result<PublicKey> {

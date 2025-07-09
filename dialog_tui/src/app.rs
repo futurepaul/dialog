@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tui_textarea::TextArea;
 use tokio::sync::mpsc;
-use dialog_lib::{DialogLib, Contact, Conversation, ConnectionStatus, AppMode, AppResult, ToBech32, hex};
+use dialog_lib::{DialogLib, Contact, Conversation, ConnectionStatus, AppMode, AppResult, ToBech32, hex, GroupId};
 use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
 
 #[derive(Debug, Clone)]
@@ -299,9 +299,7 @@ impl App {
         // Clear and set new text
         self.text_area.delete_line_by_head();
         self.text_area.delete_line_by_end();
-        for ch in new_text.chars() {
-            self.text_area.insert_char(ch);
-        }
+        self.text_area.insert_str(&new_text);
         
         // Clear search state
         self.is_searching = false;
@@ -591,9 +589,20 @@ impl App {
                 // Show user message immediately
                 self.add_message(&format!("You: {}", message));
                 
-                // Generate the response and send it with delay
-                let response = self.generate_fake_response(message, &conv).await;
-                self.send_delayed_message(response, 500);
+                // Send the message via the dialog library
+                if let Ok(bytes) = hex::decode(&conv.id) {
+                    let group_id = GroupId::from_slice(&bytes);
+                    match self.dialog_lib.send_message(&group_id, message).await {
+                        Ok(()) => {
+                            self.add_message("Message sent successfully");
+                        }
+                        Err(e) => {
+                            self.add_message(&format!("Error sending message: {}", e));
+                        }
+                    }
+                } else {
+                    self.add_message("Error: Invalid conversation ID format");
+                }
             } else {
                 self.add_message("Error: Active conversation not found.");
             }
@@ -647,6 +656,26 @@ impl App {
         }
     }
 
+    pub fn handle_paste(&mut self, text: &str) {
+        // Insert the pasted text all at once without character-by-character animation
+        self.text_area.insert_str(text);
+        
+        // Check if we need to update the mode based on the new text
+        let current_text = self.text_area.lines().join("");
+        if current_text.starts_with('/') && self.mode != AppMode::CommandInput {
+            self.mode = AppMode::CommandInput;
+            self.update_placeholder();
+        } else if !current_text.starts_with('/') && !current_text.is_empty() && self.mode != AppMode::MessageInput {
+            self.mode = AppMode::MessageInput;
+            self.update_placeholder();
+        }
+        
+        // Check for @ search in message input mode
+        if self.mode == AppMode::MessageInput {
+            self.detect_at_search(&current_text);
+        }
+    }
+
     pub fn get_status_text(&self) -> String {
         let input_context = match self.mode {
             AppMode::Normal => "Type '/' to start a command",
@@ -694,11 +723,6 @@ impl App {
         parts.join(" • ")
     }
 
-    async fn generate_fake_response(&self, _message: &str, conv: &Conversation) -> String {
-        // In real mode, we don't generate fake responses - actual responses come from MLS
-        // This is kept for UI demonstration purposes only
-        format!("{}: Thanks for your message!", conv.name)
-    }
 
     // Public getters for the UI
     pub fn get_search_suggestions(&self) -> &[ContactSuggestion] {
