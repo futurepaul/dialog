@@ -760,6 +760,181 @@ Rather than fixing the current broken text input implementation, this PRD recomm
 
 This approach leverages battle-tested libraries and proven UI patterns rather than attempting to fix custom implementations.
 
+## Code Quality and Architecture Issues to Address
+
+### Current Technical Debt
+Based on the current implementation, several code quality issues need immediate attention:
+
+#### 1. Rust Warnings and Unused Code
+**Problem**: Multiple warnings about unused variants, fields, and methods create noise and indicate incomplete implementation.
+
+**Solution Strategy**:
+- Remove unused `ConnectionStatus` variants (`Connecting`, `Disconnected`) or implement connection state management
+- Remove unused theme fields/methods or implement proper theming throughout the app
+- Remove unused `participants` field from `Conversation` or implement participant display
+
+#### 2. Array Access Anti-patterns
+**Problem**: Using numeric array indexing (`responses[message.len() % responses.len()]`) is a code smell in Rust.
+
+**Better Patterns**:
+```rust
+// Instead of: responses[message.len() % responses.len()]
+// Use: 
+use rand::seq::SliceRandom;
+let response = responses.choose(&mut rng).unwrap_or(&"Default response");
+
+// Or deterministic but safer:
+let response = responses.get(message.len() % responses.len()).unwrap_or(&"Default");
+```
+
+#### 3. Async Message Display Blocking
+**Problem**: User messages don't appear immediately because the UI waits for the async response simulation.
+
+**Solution**: Decouple message display from response generation:
+```rust
+// Show user message immediately
+self.add_message(&format!("You: {}", message));
+
+// Spawn async response in background
+let message_clone = message.to_string();
+let conv_clone = conv.clone();
+tokio::spawn(async move {
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Send response via channel back to main thread
+});
+```
+
+### Adopting Real Nostr-MLS Types
+
+#### Available Types from dialog_cli Analysis:
+Based on the dialog_cli implementation, we should adopt these real types in mock mode:
+
+**Core Types**:
+- `GroupId` - MLS group identifier (32 bytes)
+- `PublicKey` / `Keys` - Nostr key management
+- `NostrGroupConfigData` - Group configuration
+- `Event` / `EventBuilder` - Nostr event handling
+
+**Storage Types**:
+- `NostrMlsMemoryStorage` - For development/testing
+- `NostrMlsSqliteStorage` - For production
+
+**Message Types**:
+- `Kind::MlsKeyPackage` - User key packages
+- `Kind::MlsGroupMessage` - Group messages
+- `Kind::GiftWrap` - Encrypted invitations
+
+#### Implementation Strategy:
+
+1. **Add nostr-mls Dependencies to dialog_tui**:
+```toml
+[dependencies]
+nostr = { workspace = true }
+nostr-mls = { workspace = true }
+nostr-mls-memory-storage = { workspace = true }
+hex = "0.4.3"
+rand = "0.8"
+```
+
+2. **Replace Custom Types with Real Types**:
+```rust
+// Replace custom Conversation struct with real types
+#[derive(Debug, Clone)]
+pub struct MockConversation {
+    pub mls_group_id: GroupId,           // Real MLS group ID
+    pub nostr_group_id: PublicKey,       // Real Nostr public key  
+    pub config: NostrGroupConfigData,    // Real group config
+    pub participants: Vec<PublicKey>,    // Real public keys
+    pub last_message: Option<String>,
+    pub unread_count: usize,
+}
+
+// Replace custom Contact with real types
+#[derive(Debug, Clone)]
+pub struct MockContact {
+    pub public_key: PublicKey,           // Real Nostr public key
+    pub display_name: Option<String>,
+    pub online: bool,
+}
+```
+
+3. **Use Real Key Generation**:
+```rust
+// Generate realistic keys for fake contacts
+use nostr_sdk::prelude::*;
+
+impl App {
+    fn setup_mock_data(&mut self) {
+        // Generate real keys for fake contacts
+        let alice_keys = Keys::generate();
+        let bob_keys = Keys::generate();
+        
+        self.contacts.push(MockContact {
+            public_key: alice_keys.public_key(),
+            display_name: Some("Alice".to_string()),
+            online: true,
+        });
+        
+        // Create real group IDs
+        let group_id = GroupId::from_slice(&rand::random::<[u8; 32]>());
+        // ... etc
+    }
+}
+```
+
+#### Benefits of Real Types:
+- **Type Safety**: Compile-time validation of IDs and keys
+- **Future Compatibility**: Easy transition to real MLS implementation
+- **Developer Experience**: IntelliSense and documentation from real types
+- **Testing Realism**: Mock data that matches production data structures
+
+## Updated Implementation Plan
+
+### Phase 1: Code Quality Fix (Immediate)
+1. **Fix Rust Warnings**
+   - Remove or implement unused enum variants
+   - Remove or implement unused struct fields
+   - Remove or implement unused theme methods
+
+2. **Fix Array Access Patterns**
+   - Replace numeric indexing with `Iterator::cycle()` or `rand::choose()`
+   - Add proper error handling for empty collections
+
+3. **Fix Async Message Display**
+   - Decouple user message display from response generation
+   - Use channels or shared state for async response updates
+   - Ensure UI responsiveness
+
+### Phase 2: Nostr-MLS Type Adoption (Next)
+1. **Add Dependencies**
+   - Add nostr-mls workspace dependencies to dialog_tui
+   - Add utility crates (hex, rand)
+
+2. **Replace Custom Types**
+   - Replace `Conversation` with `MockConversation` using real `GroupId`
+   - Replace `Contact` with `MockContact` using real `PublicKey`
+   - Use real `NostrGroupConfigData` for group settings
+
+3. **Update Mock Data Generation**
+   - Generate real keys for fake contacts
+   - Create real group IDs for conversations
+   - Use proper hex encoding/decoding
+
+### Phase 3: Enhanced Functionality (Future)
+1. **Real Storage Integration**
+   - Integrate `NostrMlsMemoryStorage` for session persistence
+   - Add save/load functionality for conversations and contacts
+
+2. **Message Encryption Simulation**
+   - Simulate MLS message encryption/decryption flow
+   - Add group member management
+
+3. **Network Simulation**
+   - Mock relay connections and event publishing
+   - Simulate real-time message delivery
+
+This phased approach ensures immediate code quality improvements while laying groundwork for realistic MLS integration.
+
 ## Implementation Phases
 
 ### Phase 1: Core UI Foundation (MVP)

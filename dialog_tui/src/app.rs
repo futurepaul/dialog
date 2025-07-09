@@ -1,5 +1,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tui_textarea::TextArea;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use tokio::sync::mpsc;
 
 pub enum AppResult {
     Continue,
@@ -18,6 +21,16 @@ pub enum ConnectionStatus {
     Connected,
     Connecting,
     Disconnected,
+}
+
+impl ConnectionStatus {
+    pub fn simulate_connection_change(&mut self) {
+        *self = match self {
+            ConnectionStatus::Connected => ConnectionStatus::Disconnected,
+            ConnectionStatus::Connecting => ConnectionStatus::Connected,
+            ConnectionStatus::Disconnected => ConnectionStatus::Connecting,
+        };
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -49,6 +62,8 @@ pub struct App {
     pub scroll_offset: usize,
     pub contacts: Vec<Contact>,
     pub conversations: Vec<Conversation>,
+    pub delayed_message_rx: Option<mpsc::UnboundedReceiver<String>>,
+    pub delayed_message_tx: Option<mpsc::UnboundedSender<String>>,
 }
 
 impl App {
@@ -57,6 +72,9 @@ impl App {
         text_area.set_cursor_line_style(ratatui::style::Style::default());
         text_area.set_placeholder_text("Type '/' to start a command");
         
+        // Create async message channel for delayed responses
+        let (delayed_tx, delayed_rx) = mpsc::unbounded_channel();
+
         let mut app = Self {
             mode: AppMode::Normal,
             text_area,
@@ -68,6 +86,8 @@ impl App {
             scroll_offset: 0,
             contacts: Vec::new(),
             conversations: Vec::new(),
+            delayed_message_rx: Some(delayed_rx),
+            delayed_message_tx: Some(delayed_tx),
         };
 
         // Add welcome messages
@@ -180,6 +200,7 @@ impl App {
                 self.add_message("/help - Show this help message");
                 self.add_message("/quit - Exit the application");
                 self.add_message("/status - Show current setup and stats");
+                self.add_message("/connect - Toggle connection status");
                 self.add_message("/add <pubkey|nip05> - Add a new contact");
                 self.add_message("/new - Start a new conversation");
                 self.add_message("/conversations - List active conversations");
@@ -254,6 +275,9 @@ impl App {
                         };
                         let group_indicator = if conv.is_group { "[GROUP] " } else { "" };
                         self.add_message(&format!("  {}: {}{}{}{}", i + 1, group_indicator, conv.name, unread, active));
+                        if conv.is_group && !conv.participants.is_empty() {
+                            self.add_message(&format!("      Participants: {}", conv.participants.join(", ")));
+                        }
                         if let Some(ref last_msg) = conv.last_message {
                             self.add_message(&format!("      Last: {}", last_msg));
                         }
@@ -295,6 +319,10 @@ impl App {
                 self.add_message(&format!("  Pending invites: {}", self.pending_invites));
                 self.add_message(&format!("  Total messages: {}", self.messages.len()));
                 self.add_message("");
+            }
+            "/connect" => {
+                self.connection_status.simulate_connection_change();
+                self.add_message(&format!("Connection status changed to: {:?}", self.connection_status));
             }
             "/switch" => {
                 if parts.len() > 1 {
@@ -339,31 +367,12 @@ impl App {
         if let Some(ref active_id) = self.active_conversation {
             // Clone the conversation data to avoid borrowing issues
             if let Some(conv) = self.conversations.iter().find(|c| c.id == *active_id).cloned() {
+                // Show user message immediately - this should never be blocked
                 self.add_message(&format!("You: {}", message));
                 
-                // Simulate a fake response after a short delay
-                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-                
-                if conv.is_group {
-                    let responses = [
-                        "Alice: That's interesting!",
-                        "Bob: I agree with that.",
-                        "Charlie: Good point!",
-                        "Diana: Thanks for sharing!",
-                    ];
-                    let response = responses[message.len() % responses.len()];
-                    self.add_message(response);
-                } else {
-                    let responses = [
-                        "Sounds good!",
-                        "I see what you mean.",
-                        "That's interesting to hear.",
-                        "Thanks for letting me know!",
-                        "I'll think about that.",
-                    ];
-                    let response = responses[message.len() % responses.len()];
-                    self.add_message(&format!("{}: {}", conv.name, response));
-                }
+                // Generate the response and send it with delay - this won't block the UI
+                let response = self.generate_fake_response(message, &conv);
+                self.send_delayed_message(response, 500);
             } else {
                 self.add_message("Error: Active conversation not found.");
             }
@@ -389,6 +398,29 @@ impl App {
     pub fn scroll_down(&mut self) {
         if self.scroll_offset < self.messages.len().saturating_sub(1) {
             self.scroll_offset += 1;
+        }
+    }
+
+    pub fn check_delayed_messages(&mut self) {
+        let mut messages = Vec::new();
+        if let Some(ref mut rx) = self.delayed_message_rx {
+            while let Ok(message) = rx.try_recv() {
+                messages.push(message);
+            }
+        }
+        // Add all the messages after we're done with the receiver
+        for message in messages {
+            self.add_message(&message);
+        }
+    }
+
+    fn send_delayed_message(&self, message: String, delay_ms: u64) {
+        if let Some(ref tx) = self.delayed_message_tx {
+            let tx_clone = tx.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+                let _ = tx_clone.send(message);
+            });
         }
     }
 
@@ -491,5 +523,39 @@ impl App {
         // Update counts
         self.contact_count = self.contacts.len();
         self.pending_invites = 2;
+    }
+
+    fn generate_fake_response(&self, message: &str, conv: &Conversation) -> String {
+        // Use message content hash for deterministic but varied responses
+        let mut hasher = DefaultHasher::new();
+        message.hash(&mut hasher);
+        let hash = hasher.finish() as usize;
+
+        if conv.is_group {
+            let responses = [
+                "Alice: That's interesting!",
+                "Bob: I agree with that.",
+                "Charlie: Good point!",
+                "Diana: Thanks for sharing!",
+                "Alice: I hadn't thought of that.",
+                "Bob: Let's discuss this more.",
+                "Charlie: Makes sense to me.",
+                "Diana: Can you explain more?",
+            ];
+            responses.get(hash % responses.len()).unwrap_or(&"Alice: Thanks!").to_string()
+        } else {
+            let responses = [
+                "Sounds good!",
+                "I see what you mean.",
+                "That's interesting to hear.",
+                "Thanks for letting me know!",
+                "I'll think about that.",
+                "Good to hear from you!",
+                "Let me get back to you on that.",
+                "That makes sense.",
+            ];
+            let response = responses.get(hash % responses.len()).unwrap_or(&"Thanks!");
+            format!("{}: {}", conv.name, response)
+        }
     }
 }
