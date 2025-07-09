@@ -22,6 +22,15 @@ pub enum DialogError {
     
     #[error("Serialization error: {0}")]
     Serialization(String),
+    
+    #[error("General error: {0}")]
+    General(#[from] Box<dyn std::error::Error + Send + Sync>),
+    
+    #[error("Nostr MLS error: {0}")]
+    NostrMls(#[from] nostr_mls::Error),
+    
+    #[error("Nostr SDK error: {0}")]
+    NostrSdk(#[from] nostr_sdk::client::Error),
 }
 
 pub type Result<T> = std::result::Result<T, DialogError>;

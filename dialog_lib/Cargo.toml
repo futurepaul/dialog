@@ -11,7 +11,13 @@ async-trait = "0.1.88"
 chrono = "0.4.41"
 fake = { version = "4.3.0", features = ["derive"] }
 hex = "0.4.3"
+nostr.workspace = true
 nostr-mls.workspace = true
+nostr-mls-memory-storage.workspace = true
+nostr-sdk.workspace = true
 rand = "0.9.1"
 thiserror.workspace = true
 tokio = { workspace = true, features = ["full"] }
+
+[features]
+default = []
