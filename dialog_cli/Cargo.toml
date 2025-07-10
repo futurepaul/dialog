@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+dialog_lib = { path = "../dialog_lib" }
 nostr = { workspace = true }
 nostr-mls = { workspace = true }
 nostr-mls-sqlite-storage = { workspace = true }

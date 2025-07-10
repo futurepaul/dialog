@@ -23,6 +23,9 @@ pub enum DialogError {
     #[error("Serialization error: {0}")]
     Serialization(String),
     
+    #[error("Storage error: {0}")]
+    Storage(String),
+    
     #[error("General error: {0}")]
     General(#[from] Box<dyn std::error::Error + Send + Sync>),
     

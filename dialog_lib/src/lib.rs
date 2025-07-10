@@ -3,13 +3,15 @@ pub mod errors;
 pub mod service;
 pub mod mls_service;
 pub mod config;
+pub mod storage;
 
 // Re-export commonly used types
 pub use types::*;
 pub use errors::*;
 pub use service::MlsService;
-pub use mls_service::RealMlsService;
+pub use mls_service::{RealMlsService, RealMlsServiceBuilder};
 pub use config::DialogConfig;
+pub use storage::{StorageBackend, NostrMlsStorage};
 
 // Re-export Nostr-MLS types to eliminate direct dependencies in UIs
 pub use nostr_mls::prelude::{
@@ -35,8 +37,11 @@ impl DialogLib {
     pub async fn new() -> Result<Self> {
         let keys = nostr_mls::prelude::Keys::generate();
         let config = DialogConfig::new();
+        let relay_url = config.relay_urls.first()
+            .ok_or_else(|| DialogError::General("No relay URLs configured".into()))?
+            .clone();
         let service: Arc<dyn MlsService> = Arc::new(
-            RealMlsService::new(keys, config.relay_url).await?
+            RealMlsService::new(keys, relay_url).await?
         );
         Ok(Self { service })
     }
@@ -44,8 +49,11 @@ impl DialogLib {
     /// Create a new DialogLib instance with specific keys
     pub async fn new_with_keys(keys: nostr_mls::prelude::Keys) -> Result<Self> {
         let config = DialogConfig::new();
+        let relay_url = config.relay_urls.first()
+            .ok_or_else(|| DialogError::General("No relay URLs configured".into()))?
+            .clone();
         let service: Arc<dyn MlsService> = Arc::new(
-            RealMlsService::new(keys, config.relay_url).await?
+            RealMlsService::new(keys, relay_url).await?
         );
         Ok(Self { service })
     }
@@ -63,6 +71,19 @@ impl DialogLib {
     pub async fn new_with_keys_and_relay(keys: nostr_mls::prelude::Keys, relay_url: impl Into<String>) -> Result<Self> {
         let service: Arc<dyn MlsService> = Arc::new(
             RealMlsService::new(keys, relay_url.into()).await?
+        );
+        Ok(Self { service })
+    }
+    
+    /// Create a new DialogLib instance with custom storage backend
+    pub async fn new_with_storage(keys: nostr_mls::prelude::Keys, relay_url: impl Into<String>, storage_backend: StorageBackend) -> Result<Self> {
+        let service: Arc<dyn MlsService> = Arc::new(
+            RealMlsService::builder()
+                .keys(keys)
+                .relay_url(relay_url)
+                .storage_backend(storage_backend)
+                .build()
+                .await?
         );
         Ok(Self { service })
     }

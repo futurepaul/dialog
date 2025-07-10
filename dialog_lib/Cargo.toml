@@ -13,7 +13,10 @@ hex = "0.4.3"
 nostr.workspace = true
 nostr-mls.workspace = true
 nostr-mls-memory-storage.workspace = true
+nostr-mls-sqlite-storage.workspace = true
+nostr-mls-storage.workspace = true
 nostr-sdk.workspace = true
+openmls = { git = "https://github.com/openmls/openmls", rev = "4cc0f594b11262083ad9827b3b2033052c6ef99f" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror.workspace = true

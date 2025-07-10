@@ -1,39 +1,34 @@
 use clap::{Arg, Command};
+use dialog_lib::{DialogLib, StorageBackend, Keys, PublicKey, GroupId, hex};
 use dotenv::{dotenv, from_path};
-use nostr_mls::prelude::*;
-use nostr_mls_sqlite_storage::NostrMlsSqliteStorage;
-use nostr_mls_memory_storage::NostrMlsMemoryStorage;
-use nostr_sdk::{prelude::*, nips::nip59};
-use nostr_mls::groups::NostrGroupConfigData;
+use nostr_sdk::prelude::*;
 use std::{env, path::PathBuf, fs};
 use thiserror::Error;
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
-
-
-/// Generate a new identity and return the keys, NostrMls instance, and temp directory
-/// We use a different temp directory for each identity because OpenMLS doesn't have a concept of partitioning storage for different identities.
-/// Because of this, we need to create diffrent databases for each identity.
-fn generate_identity_with_key(
-    sk_hex: &str,
-) -> Result<(Keys, NostrMls<NostrMlsSqliteStorage>), Box<dyn std::error::Error>> {
-    let keys = Keys::parse(sk_hex)?;
-    let data_dir = env::current_dir()?.join(".dialog_cli_data");
-    let identity_dir = data_dir.join(keys.public_key().to_hex());
-    fs::create_dir_all(&identity_dir)?;
-    let db_path = identity_dir.join("mls.db");
-    let nostr_mls = NostrMls::new(NostrMlsSqliteStorage::new(db_path).unwrap());
-    Ok((keys, nostr_mls))
-}
-
-/// Generate a new identity with memory storage
-fn generate_identity_with_memory(
-    sk_hex: &str,
-) -> Result<(Keys, NostrMls<NostrMlsMemoryStorage>), Box<dyn std::error::Error>> {
-    let keys = Keys::parse(sk_hex)?;
-    let nostr_mls = NostrMls::new(NostrMlsMemoryStorage::default());
-    Ok((keys, nostr_mls))
+#[derive(Error, Debug)]
+enum DialogError {
+    #[error("Dialog lib error: {0}")]
+    DialogLib(#[from] dialog_lib::DialogError),
+    
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+    
+    #[error("Environment variable error: {0}")]
+    Env(#[from] std::env::VarError),
+    
+    #[error("Parse error: {0}")]
+    Parse(#[from] std::num::ParseIntError),
+    
+    #[error("Tracing error: {0}")]
+    Tracing(#[from] tracing::subscriber::SetGlobalDefaultError),
+    
+    #[error("Key error: {0}")]
+    Key(#[from] nostr_sdk::key::Error),
+    
+    #[error("General error: {0}")]
+    General(String),
 }
 
 fn find_and_load_env() {
@@ -58,83 +53,37 @@ fn find_and_load_env() {
     }
 }
 
-fn get_secret_key(key_arg: &str) -> Result<String, Box<dyn std::error::Error>> {
+fn get_secret_key(key_arg: &str) -> Result<String, DialogError> {
     match key_arg {
         "bob" => {
             find_and_load_env();
-            env::var("BOB_SK_HEX")
-                .map_err(|_| "BOB_SK_HEX not found in environment variables".into())
+            Ok(env::var("BOB_SK_HEX")?)
         }
         "alice" => {
             find_and_load_env();
-            env::var("ALICE_SK_HEX")
-                .map_err(|_| "ALICE_SK_HEX not found in environment variables".into())
+            Ok(env::var("ALICE_SK_HEX")?)
         }
         hex_key => {
             // Validate that it looks like a hex string
             if hex_key.len() == 64 && hex_key.chars().all(|c| c.is_ascii_hexdigit()) {
                 Ok(hex_key.to_string())
             } else {
-                Err("Key must be either 'bob', 'alice', or a 64-character hex string".into())
+                Err(DialogError::General("Key must be either 'bob', 'alice', or a 64-character hex string".into()))
             }
         }
     }
 }
 
-fn find_group_by_id(
-    nostr_mls: &NostrMls<NostrMlsSqliteStorage>,
-    group_id_hex: &str,
-) -> Result<group_types::Group, DialogError> {
-    let groups = nostr_mls.get_groups()?;
+async fn create_dialog_lib(sk_hex: &str, relay_url: &str) -> Result<DialogLib, DialogError> {
+    let keys = Keys::parse(sk_hex)?;
+    let data_dir = env::current_dir()?.join(".dialog_cli_data");
+    let identity_dir = data_dir.join(keys.public_key().to_hex());
+    fs::create_dir_all(&identity_dir)?;
+    let db_path = identity_dir.join("mls.db");
     
-    // Try as MLS Group ID first (32 hex chars)
-    if group_id_hex.len() == 32 {
-        if let Ok(group_id_bytes) = ::hex::decode(group_id_hex) {
-            let mls_group_id = GroupId::from_slice(&group_id_bytes);
-            for group in &groups {
-                if group.mls_group_id == mls_group_id {
-                    return Ok(group.clone());
-                }
-            }
-        }
-    }
+    let storage_backend = StorageBackend::Sqlite { path: db_path };
     
-    // Try as Nostr Group ID (64 hex chars)
-    if group_id_hex.len() == 64 {
-        if let Ok(nostr_group_id_bytes) = ::hex::decode(group_id_hex) {
-            for group in &groups {
-                if group.nostr_group_id.as_slice() == nostr_group_id_bytes.as_slice() {
-                    return Ok(group.clone());
-                }
-            }
-        }
-    }
-    
-    Err(DialogError::General("Group not found".into()))
-}
-
-#[derive(Error, Debug)]
-enum DialogError {
-    #[error("Nostr MLS error: {0}")]
-    NostrMls(#[from] nostr_mls::Error),
-
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
-
-    #[error("Environment variable error: {0}")]
-    Env(#[from] std::env::VarError),
-
-    #[error("Parse error: {0}")]
-    Parse(#[from] std::num::ParseIntError),
-
-    #[error("Tracing error: {0}")]
-    Tracing(#[from] tracing::subscriber::SetGlobalDefaultError),
-
-    #[error("Key error: {0}")]
-    Key(#[from] nostr_sdk::key::Error),
-
-    #[error("General error: {0}")]
-    General(#[from] Box<dyn std::error::Error>),
+    Ok(DialogLib::new_with_storage(keys, relay_url, storage_backend).await?)
 }
 
 #[tokio::main]
@@ -160,12 +109,6 @@ async fn main() -> Result<(), DialogError> {
                         .value_name("KEY")
                         .help("Secret key for identity: 'bob', 'alice', or hex string")
                         .required(true),
-                )
-                .arg(
-                    Arg::new("memory-storage")
-                        .long("memory-storage")
-                        .help("Use memory storage instead of SQLite (for testing)")
-                        .action(clap::ArgAction::SetTrue),
                 ),
         )
         .subcommand(
@@ -270,305 +213,123 @@ async fn main() -> Result<(), DialogError> {
                         .required(true),
                 ),
         )
-        .subcommand(Command::new("list").about("Lists all MLS key packages from the relay"))
         .subcommand(
-            Command::new("create-group-and-send")
-                .about("Creates a new group, invites a counterparty, and immediately sends a message")
+            Command::new("list-groups")
+                .about("Lists all groups")
                 .arg(
                     Arg::new("key")
                         .long("key")
                         .value_name("KEY")
                         .help("Secret key for your identity")
                         .required(true),
-                )
-                .arg(
-                    Arg::new("name")
-                        .long("name")
-                        .help("Name of the group")
-                        .required(true),
-                )
-                .arg(
-                    Arg::new("counterparty")
-                        .long("counterparty")
-                        .help("Public key of the counterparty to invite")
-                        .required(true),
-                )
-                .arg(
-                    Arg::new("message")
-                        .long("message")
-                        .help("Message to send immediately after group creation")
-                        .required(true),
                 ),
         )
         .get_matches();
+
+    let relay_url = "ws://localhost:8080";
 
     match matches.subcommand() {
         Some(("publish-key", sub_matches)) => {
             let key_arg = sub_matches.get_one::<String>("key").unwrap();
             let sk_hex = get_secret_key(key_arg)?;
-            let use_memory = sub_matches.get_flag("memory-storage");
+            println!("Using key for: {}", key_arg);
             
-            let relay_url = RelayUrl::parse("ws://localhost:8080").unwrap();
-
-            if use_memory {
-                println!("Using memory storage for: {}", key_arg);
-                let (keys, nostr_mls) = generate_identity_with_memory(&sk_hex)?;
-                
-                let (key_package_encoded, tags) =
-                    nostr_mls.create_key_package_for_event(&keys.public_key(), [relay_url.clone()])?;
-
-                let key_package_event = EventBuilder::new(Kind::MlsKeyPackage, key_package_encoded)
-                    .tags(tags)
-                    .sign_with_keys(&keys)
-                    .map_err(|e| DialogError::General(Box::new(e)))?;
-                println!("Key package event: {:?}", key_package_event);
-
-                let client = Client::new(keys.clone());
-                client
-                    .add_relay(relay_url.to_string())
-                    .await
-                    .map_err(|e| DialogError::General(Box::new(e)))?;
-                client.connect().await;
-
-                println!("Publishing key package event...");
-                let output = client
-                    .send_event(&key_package_event)
-                    .await
-                    .map_err(|e| DialogError::General(Box::new(e)))?;
-                println!(
-                    "Event ID: {}",
-                    output.id().to_bech32().map_err(|e| DialogError::General(Box::new(e)))?
-                );
-                println!("Sent to: {:?}", output.success);
-                println!("Not sent to: {:?}", output.failed);
-            } else {
-                println!("Using SQLite storage for: {}", key_arg);
-                let (keys, nostr_mls) = generate_identity_with_key(&sk_hex)?;
-                
-                let (key_package_encoded, tags) =
-                    nostr_mls.create_key_package_for_event(&keys.public_key(), [relay_url.clone()])?;
-
-                let key_package_event = EventBuilder::new(Kind::MlsKeyPackage, key_package_encoded)
-                    .tags(tags)
-                    .sign_with_keys(&keys)
-                    .map_err(|e| DialogError::General(Box::new(e)))?;
-                println!("Key package event: {:?}", key_package_event);
-
-                let client = Client::new(keys.clone());
-                client
-                    .add_relay(relay_url.to_string())
-                    .await
-                    .map_err(|e| DialogError::General(Box::new(e)))?;
-                client.connect().await;
-
-                println!("Publishing key package event...");
-                let output = client
-                    .send_event(&key_package_event)
-                    .await
-                    .map_err(|e| DialogError::General(Box::new(e)))?;
-                println!(
-                    "Event ID: {}",
-                    output.id().to_bech32().map_err(|e| DialogError::General(Box::new(e)))?
-                );
-                println!("Sent to: {:?}", output.success);
-                println!("Not sent to: {:?}", output.failed);
+            let dialog_lib = create_dialog_lib(&sk_hex, relay_url).await?;
+            
+            // Connect to relay
+            dialog_lib.connect().await?;
+            
+            // Publish key packages
+            let event_ids = dialog_lib.publish_key_packages().await?;
+            println!("Published {} key package(s)", event_ids.len());
+            for event_id in event_ids {
+                println!("Event ID: {}", event_id);
             }
         }
         Some(("create-group", sub_matches)) => {
             let key_arg = sub_matches.get_one::<String>("key").unwrap();
             let sk_hex = get_secret_key(key_arg)?;
-            let (keys, nostr_mls) = generate_identity_with_key(&sk_hex)?;
+            let dialog_lib = create_dialog_lib(&sk_hex, relay_url).await?;
             println!("Using key for: {}", key_arg);
+
+            // Connect to relay
+            dialog_lib.connect().await?;
 
             let group_name = sub_matches.get_one::<String>("name").unwrap();
             let counterparty_pk_hex = sub_matches.get_one::<String>("counterparty").unwrap();
-            let counterparty_pk = PublicKey::from_hex(counterparty_pk_hex)
-                .map_err(|e| DialogError::General(Box::new(e)))?;
+            let counterparty_pk = PublicKey::from_hex(counterparty_pk_hex)?;
 
-            let relay_url_str = "ws://localhost:8080";
-            let client = Client::new(keys.clone());
-            client
-                .add_relay(relay_url_str)
-                .await
-                .map_err(|e| DialogError::General(Box::new(e)))?;
-            client.connect().await;
-
-            println!("Fetching key package for counterparty: {}", counterparty_pk.to_hex());
-            let filter = Filter::new()
-                .kind(Kind::MlsKeyPackage)
-                .author(counterparty_pk);
-            let timeout = std::time::Duration::from_secs(10);
-
-            let events = client
-                .fetch_events(filter, timeout)
-                .await
-                .map_err(|e| DialogError::General(Box::new(e)))?;
-
-            if let Some(key_package_event) = events.first() {
-                println!("Found key package event for counterparty: {}", key_package_event.id);
-
-                // Parse the key package to validate it (following mls_sqlite.rs working example)
-                let _counterparty_key_package = nostr_mls.parse_key_package(key_package_event)
-                    .map_err(|e| DialogError::General(Box::new(e)))?;
-                println!("Successfully parsed counterparty's key package");
-
-                let admins = vec![keys.public_key(), counterparty_pk];
-                let relay_url = RelayUrl::parse(relay_url_str).unwrap();
-
-                let config = NostrGroupConfigData::new(
-                    group_name.to_string(),
-                    "".to_string(),
-                    None,
-                    None,
-                    vec![relay_url],
-                );
-
-                let group_create_result = nostr_mls
-                    .create_group(
-                        &keys.public_key(),
-                        vec![key_package_event.clone()],
-                        admins,
-                        config,
-                    )
-                    .map_err(|e| DialogError::General(Box::new(e)))?;
-
-                println!(
-                    "Group created successfully. Group ID: {}",
-                    ::hex::encode(group_create_result.group.mls_group_id.as_slice())
-                );
-                println!("Group created at epoch: {}", group_create_result.group.epoch);
-
-                let welcome_rumors = group_create_result.welcome_rumors;
-                println!("Publishing {} welcome rumor(s)...", welcome_rumors.len());
-
-                for rumor in welcome_rumors {
-                    let gift_wrap_event = EventBuilder::gift_wrap(&keys, &counterparty_pk, rumor, None)
-                        .await
-                        .map_err(|e| DialogError::General(Box::new(e)))?;
-
-                    println!("Publishing welcome rumor event (gift-wrapped): {}", gift_wrap_event.id);
-                    let output = client
-                        .send_event(&gift_wrap_event)
-                        .await
-                        .map_err(|e| DialogError::General(Box::new(e)))?;
-                    println!("Published welcome rumor event ID: {:?}", output.id());
-                }
-            } else {
-                println!("Could not find key package for counterparty on the relay.");
-            }
+            println!("Creating group '{}' with counterparty: {}", group_name, counterparty_pk.to_hex());
+            
+            let group_id = dialog_lib.create_conversation(group_name, vec![counterparty_pk]).await?;
+            println!("Group created successfully. Group ID: {}", group_id);
         }
         Some(("send-message", sub_matches)) => {
             let key_arg = sub_matches.get_one::<String>("key").unwrap();
             let sk_hex = get_secret_key(key_arg)?;
-            let (keys, nostr_mls) = generate_identity_with_key(&sk_hex)?;
+            let dialog_lib = create_dialog_lib(&sk_hex, relay_url).await?;
             println!("Using key for: {}", key_arg);
 
+            // Connect to relay
+            dialog_lib.connect().await?;
+
             let group_id_hex = sub_matches.get_one::<String>("group-id").unwrap();
-            let stored_group = find_group_by_id(&nostr_mls, group_id_hex)?;
-            let group_id = stored_group.mls_group_id.clone();
-
-            let relay_url_str = "ws://localhost:8080";
-            let client = Client::new(keys.clone());
-            client
-                .add_relay(relay_url_str)
-                .await
-                .map_err(|e| DialogError::General(Box::new(e)))?;
-            client.connect().await;
-
-            // CRITICAL: Fetch and process any MLS evolution events before sending
-            // This ensures Alice's group state is synchronized with other members
-            let nostr_group_id_hex = ::hex::encode(&stored_group.nostr_group_id);
-            let filter = Filter::new()
-                .kind(Kind::MlsGroupMessage)
-                .custom_tag(nostr_sdk::SingleLetterTag::lowercase(nostr_sdk::Alphabet::H), nostr_group_id_hex);
-
-            let events = client.fetch_events(filter, std::time::Duration::from_secs(10)).await.map_err(|e| DialogError::General(Box::new(e)))?;
-            println!("Found {} MLS group evolution events before sending", events.len());
-            for event in events {
-                println!("Processing evolution event {} with kind {:?}", event.id, event.kind);
-                if let Err(e) = nostr_mls.process_message(&event) {
-                    println!("Failed to process evolution event {}: {}", event.id, e);
-                } else {
-                    println!("Successfully processed evolution event {}", event.id);
-                }
-            }
-
-            // Debug: Check what epoch Alice thinks the group is at
-            let groups = nostr_mls.get_groups()?;
-            if let Some(alice_group) = groups.iter().find(|g| g.mls_group_id == group_id) {
-                println!("Alice's view: Group is at epoch {}", alice_group.epoch);
-            }
-
             let message = sub_matches.get_one::<String>("message").unwrap();
 
-            let rumor = EventBuilder::new(Kind::TextNote, message).build(keys.public_key());
-
-            let message_event = nostr_mls
-                .create_message(&group_id, rumor)
-                .map_err(|e| DialogError::General(Box::new(e)))?;
-            
-            println!("Created message event with kind: {:?}", message_event.kind);
-
-            println!("Sending message event: {}", message_event.id);
-            let output = client
-                .send_event(&message_event)
-                .await
-                .map_err(|e| DialogError::General(Box::new(e)))?;
-
-            println!("Sent message event ID: {:?}", output.id());
-
-            // CRITICAL: Process the message event locally to maintain MLS group state synchronization
-            // This is required in MLS - the sender must also process their own message
-            println!("Processing message event locally...");
-            if let Err(e) = nostr_mls.process_message(&message_event) {
-                println!("Failed to process own message locally: {}", e);
+            // Parse group ID (supporting both 32 and 64 char hex)
+            let group_id = if group_id_hex.len() == 32 {
+                let group_id_bytes = hex::decode(group_id_hex)
+                    .map_err(|e| DialogError::General(format!("Invalid group ID: {}", e)))?;
+                GroupId::from_slice(&group_id_bytes)
+            } else if group_id_hex.len() == 64 {
+                // Need to find the group by Nostr ID
+                let conversations = dialog_lib.get_conversations().await?;
+                conversations.iter()
+                    .find(|c| &c.id == group_id_hex)
+                    .ok_or(DialogError::General("Group not found".into()))?
+                    .group_id
+                    .clone()
+                    .ok_or(DialogError::General("Group has no MLS group ID".into()))?
             } else {
-                println!("Successfully processed own message locally");
-            }
+                return Err(DialogError::General("Invalid group ID length".into()));
+            };
+
+            // Sync group state before sending
+            dialog_lib.fetch_and_process_group_events(&group_id).await?;
+
+            println!("Sending message to group...");
+            dialog_lib.send_message(&group_id, message).await?;
+            println!("Message sent successfully!");
         }
         Some(("list-invites", sub_matches)) => {
             let key_arg = sub_matches.get_one::<String>("key").unwrap();
             let sk_hex = get_secret_key(key_arg)?;
-            let (keys, nostr_mls) = generate_identity_with_key(&sk_hex)?;
+            let dialog_lib = create_dialog_lib(&sk_hex, relay_url).await?;
             println!("Listing invites for: {}", key_arg);
 
-            // First, fetch gift-wrapped events from the relay
-            let relay_url_str = "ws://localhost:8080";
-            let client = Client::new(keys.clone());
-            client
-                .add_relay(relay_url_str)
-                .await
-                .map_err(|e| DialogError::General(Box::new(e)))?;
-            client.connect().await;
+            // Connect to relay
+            dialog_lib.connect().await?;
 
-            // Fetch gift-wrapped events (Kind::GiftWrap)
-            let filter = Filter::new().kind(Kind::GiftWrap).pubkey(keys.public_key());
-            let events = client
-                .fetch_events(filter, std::time::Duration::from_secs(10))
-                .await
-                .map_err(|e| DialogError::General(Box::new(e)))?;
-
-            // Process gift-wrapped events to extract welcome messages
-            for event in events {
-                // Try to extract rumor from gift wrap using NIP-59
-                if let Ok(unwrapped_gift) = nip59::extract_rumor(&keys, &event).await {
-                    // Process the welcome rumor
-                    if let Err(e) = nostr_mls.process_welcome(&event.id, &unwrapped_gift.rumor) {
-                        // Ignore errors - the event might not be a welcome message
-                        tracing::debug!("Failed to process welcome rumor from {}: {}", unwrapped_gift.sender, e);
-                    }
+            let invite_result = dialog_lib.list_pending_invites().await?;
+            
+            if invite_result.processing_errors.len() > 0 {
+                println!("\nProcessing errors:");
+                for error in &invite_result.processing_errors {
+                    println!("  {}", error);
                 }
             }
-
-            let pending_welcomes = nostr_mls.get_pending_welcomes()?;
-            if pending_welcomes.is_empty() {
-                println!("No pending invites found.");
+            
+            if invite_result.invites.is_empty() {
+                println!("\nNo pending invites found.");
             } else {
-                println!("Pending invites:");
-                for welcome in pending_welcomes {
-                    println!("  Group Name: {}", welcome.group_name);
-                    println!("  Group ID: {}", ::hex::encode(welcome.mls_group_id.as_slice()));
-                    println!("  Member Count: {}", welcome.member_count);
+                println!("\nPending invites:");
+                for invite in invite_result.invites {
+                    println!("  Group Name: {}", invite.group_name);
+                    println!("  Group ID: {}", hex::encode(invite.group_id.as_slice()));
+                    println!("  Member Count: {}", invite.member_count);
+                    if let Some(inviter) = invite.inviter {
+                        println!("  Inviter: {}", inviter.to_hex());
+                    }
                     println!("");
                 }
             }
@@ -576,225 +337,93 @@ async fn main() -> Result<(), DialogError> {
         Some(("accept-invite", sub_matches)) => {
             let key_arg = sub_matches.get_one::<String>("key").unwrap();
             let sk_hex = get_secret_key(key_arg)?;
-            let (_keys, nostr_mls) = generate_identity_with_key(&sk_hex)?;
+            let dialog_lib = create_dialog_lib(&sk_hex, relay_url).await?;
             println!("Accepting invite for: {}", key_arg);
 
-            let group_id_hex = sub_matches.get_one::<String>("group-id").unwrap();
-            let group_id_bytes = ::hex::decode(group_id_hex).map_err(|e| DialogError::General(Box::new(e)))?;
-            let group_id = GroupId::from_slice(&group_id_bytes);
+            // Connect to relay
+            dialog_lib.connect().await?;
 
-            let pending_welcomes = nostr_mls.get_pending_welcomes()?;
-            if let Some(welcome) = pending_welcomes
-                .iter()
-                .find(|w| w.mls_group_id == group_id)
-            {
-                nostr_mls.accept_welcome(welcome)?;
-                println!("Successfully joined group: {}", welcome.group_name);
-            } else {
-                println!("No pending invite found for group ID: {}", group_id_hex);
-            }
+            let group_id_hex = sub_matches.get_one::<String>("group-id").unwrap();
+            
+            dialog_lib.accept_invite(group_id_hex).await?;
+            println!("Successfully joined group!");
         }
         Some(("get-pubkey", sub_matches)) => {
             let key_arg = sub_matches.get_one::<String>("key").unwrap();
             let sk_hex = get_secret_key(key_arg)?;
-            let keys =
-                Keys::parse(&sk_hex).map_err(|e| DialogError::General(Box::new(e)))?;
+            let keys = Keys::parse(&sk_hex)?;
             println!("{}", keys.public_key().to_hex());
         }
         Some(("get-messages", sub_matches)) => {
             let key_arg = sub_matches.get_one::<String>("key").unwrap();
             let sk_hex = get_secret_key(key_arg)?;
-            let (keys, nostr_mls) = generate_identity_with_key(&sk_hex)?;
+            let dialog_lib = create_dialog_lib(&sk_hex, relay_url).await?;
             println!("Getting messages for: {}", key_arg);
 
-            let group_id_hex = sub_matches.get_one::<String>("group-id").unwrap();
-            let stored_group = find_group_by_id(&nostr_mls, group_id_hex)?;
-            let mls_group_id = stored_group.mls_group_id.clone();
-            
-            // Fetch and process MLS group messages from the relay
-            let relay_url_str = "ws://localhost:8080";
-            let client = Client::new(keys.clone());
-            client
-                .add_relay(relay_url_str)
-                .await
-                .map_err(|e| DialogError::General(Box::new(e)))?;
-            client.connect().await;
-            
-            // Filter for MLS group messages tagged with this group's Nostr Group ID
-            let nostr_group_id_hex = ::hex::encode(&stored_group.nostr_group_id);
-            let filter = Filter::new()
-                .kind(Kind::MlsGroupMessage)
-                .custom_tag(nostr_sdk::SingleLetterTag::lowercase(nostr_sdk::Alphabet::H), nostr_group_id_hex);
+            // Connect to relay
+            dialog_lib.connect().await?;
 
-            let events = client.fetch_events(filter, std::time::Duration::from_secs(10)).await.map_err(|e| DialogError::General(Box::new(e)))?;
-            println!("Found {} MLS group message events on relay", events.len());
-            for event in events {
-                println!("Processing event {} with kind {:?}", event.id, event.kind);
-                if let Err(e) = nostr_mls.process_message(&event) {
-                    println!("Failed to process message event {}: {}", event.id, e);
-                } else {
-                    println!("Successfully processed message event {}", event.id);
+            let group_id_hex = sub_matches.get_one::<String>("group-id").unwrap();
+            
+            // Parse group ID
+            let group_id = if group_id_hex.len() == 32 {
+                let group_id_bytes = hex::decode(group_id_hex)
+                    .map_err(|e| DialogError::General(format!("Invalid group ID: {}", e)))?;
+                GroupId::from_slice(&group_id_bytes)
+            } else if group_id_hex.len() == 64 {
+                // Need to find the group by Nostr ID
+                let conversations = dialog_lib.get_conversations().await?;
+                conversations.iter()
+                    .find(|c| &c.id == group_id_hex)
+                    .ok_or(DialogError::General("Group not found".into()))?
+                    .group_id
+                    .clone()
+                    .ok_or(DialogError::General("Group has no MLS group ID".into()))?
+            } else {
+                return Err(DialogError::General("Invalid group ID length".into()));
+            };
+
+            let result = dialog_lib.fetch_messages(&group_id).await?;
+            
+            if result.processing_errors.len() > 0 {
+                println!("\nProcessing errors:");
+                for error in &result.processing_errors {
+                    println!("  {}", error);
                 }
             }
-
-            // Debug: Check what epoch Bob thinks the group is at
-            let groups = nostr_mls.get_groups()?;
-            if let Some(bob_group) = groups.iter().find(|g| g.mls_group_id == mls_group_id) {
-                println!("Bob's view: Group is at epoch {}", bob_group.epoch);
-            }
-
-            let messages = nostr_mls.get_messages(&mls_group_id)?;
-            if messages.is_empty() {
-                println!("No messages found in group.");
+            
+            if result.messages.is_empty() {
+                println!("\nNo messages found in group.");
             } else {
                 println!("\n--- Messages for group {} ---", group_id_hex);
-                for message in messages {
-                    println!("From: {}", message.pubkey.to_hex());
+                for message in result.messages {
+                    println!("From: {}", message.sender.to_hex());
                     println!("Content: {}", message.content);
                     println!("--------------------");
                 }
             }
         }
-        Some(("list", _sub_matches)) => {
-            println!("Listing key packages from relay...");
-            let relay_url = RelayUrl::parse("ws://localhost:8080").unwrap();
-            let client = Client::new(Keys::generate());
-            client
-                .add_relay(relay_url.to_string())
-                .await
-                .map_err(|e| DialogError::General(Box::new(e)))?;
-            client.connect().await;
-
-            let filter = Filter::new().kind(Kind::MlsKeyPackage);
-            let timeout = std::time::Duration::from_secs(10);
-
-            let events = client
-                .fetch_events(filter, timeout)
-                .await
-                .map_err(|e| DialogError::General(Box::new(e)))?;
-
-            if events.is_empty() {
-                println!("No key packages found.");
-            } else {
-                println!("Found {} key packages:", events.len());
-                for event in events {
-                    println!("- Event ID: {}", event.id);
-                    println!("  Public Key: {}", event.pubkey);
-                    println!("  Content: {}", event.content);
-                    println!("  Kind: {}", event.kind);
-                    println!("  Tags: {:?}", event.tags);
-                    println!("");
-                }
-            }
-        }
-        Some(("create-group-and-send", sub_matches)) => {
+        Some(("list-groups", sub_matches)) => {
             let key_arg = sub_matches.get_one::<String>("key").unwrap();
             let sk_hex = get_secret_key(key_arg)?;
-            let (keys, nostr_mls) = generate_identity_with_key(&sk_hex)?;
-            println!("Using key for: {}", key_arg);
+            let dialog_lib = create_dialog_lib(&sk_hex, relay_url).await?;
+            println!("Listing groups for: {}", key_arg);
 
-            let group_name = sub_matches.get_one::<String>("name").unwrap();
-            let counterparty_pk_hex = sub_matches.get_one::<String>("counterparty").unwrap();
-            let counterparty_pk = PublicKey::from_hex(counterparty_pk_hex)
-                .map_err(|e| DialogError::General(Box::new(e)))?;
-
-            let message = sub_matches.get_one::<String>("message").unwrap();
-
-            let relay_url_str = "ws://localhost:8080";
-            let client = Client::new(keys.clone());
-            client
-                .add_relay(relay_url_str)
-                .await
-                .map_err(|e| DialogError::General(Box::new(e)))?;
-            client.connect().await;
-
-            println!("Fetching key package for counterparty: {}", counterparty_pk.to_hex());
-            let filter = Filter::new()
-                .kind(Kind::MlsKeyPackage)
-                .author(counterparty_pk);
-            let timeout = std::time::Duration::from_secs(10);
-
-            let events = client
-                .fetch_events(filter, timeout)
-                .await
-                .map_err(|e| DialogError::General(Box::new(e)))?;
-
-            if let Some(key_package_event) = events.first() {
-                println!("Found key package event for counterparty: {}", key_package_event.id);
-
-                // Parse the key package to validate it (following mls_sqlite.rs working example)
-                let _counterparty_key_package = nostr_mls.parse_key_package(key_package_event)
-                    .map_err(|e| DialogError::General(Box::new(e)))?;
-                println!("Successfully parsed counterparty's key package");
-
-                let admins = vec![keys.public_key(), counterparty_pk];
-                let relay_url = RelayUrl::parse(relay_url_str).unwrap();
-
-                let config = NostrGroupConfigData::new(
-                    group_name.to_string(),
-                    "".to_string(),
-                    None,
-                    None,
-                    vec![relay_url],
-                );
-
-                let group_create_result = nostr_mls
-                    .create_group(
-                        &keys.public_key(),
-                        vec![key_package_event.clone()],
-                        admins,
-                        config,
-                    )
-                    .map_err(|e| DialogError::General(Box::new(e)))?;
-
-                println!(
-                    "Group created successfully. Group ID: {}",
-                    ::hex::encode(group_create_result.group.mls_group_id.as_slice())
-                );
-                println!("Group created at epoch: {}", group_create_result.group.epoch);
-
-                let welcome_rumors = group_create_result.welcome_rumors;
-                println!("Publishing {} welcome rumor(s)...", welcome_rumors.len());
-
-                for rumor in welcome_rumors {
-                    let gift_wrap_event = EventBuilder::gift_wrap(&keys, &counterparty_pk, rumor, None)
-                        .await
-                        .map_err(|e| DialogError::General(Box::new(e)))?;
-
-                    println!("Publishing welcome rumor event (gift-wrapped): {}", gift_wrap_event.id);
-                    let output = client
-                        .send_event(&gift_wrap_event)
-                        .await
-                        .map_err(|e| DialogError::General(Box::new(e)))?;
-                    println!("Published welcome rumor event ID: {:?}", output.id());
-                }
-
-                let rumor = EventBuilder::new(Kind::TextNote, message).build(keys.public_key());
-
-                let message_event = nostr_mls
-                    .create_message(&group_create_result.group.mls_group_id, rumor)
-                    .map_err(|e| DialogError::General(Box::new(e)))?;
-                
-                println!("Created message event with kind: {:?}", message_event.kind);
-
-                println!("Sending message event: {}", message_event.id);
-                let output = client
-                    .send_event(&message_event)
-                    .await
-                    .map_err(|e| DialogError::General(Box::new(e)))?;
-
-                println!("Sent message event ID: {:?}", output.id());
-
-                // CRITICAL: Process the message event locally to maintain MLS group state synchronization
-                // This is required in MLS - the sender must also process their own message
-                println!("Processing message event locally...");
-                if let Err(e) = nostr_mls.process_message(&message_event) {
-                    println!("Failed to process own message locally: {}", e);
-                } else {
-                    println!("Successfully processed own message locally");
-                }
+            let conversations = dialog_lib.get_conversations().await?;
+            
+            if conversations.is_empty() {
+                println!("No groups found.");
             } else {
-                println!("Could not find key package for counterparty on the relay.");
+                println!("\nGroups:");
+                for conv in conversations {
+                    println!("  Name: {}", conv.name);
+                    if let Some(group_id) = &conv.group_id {
+                        println!("  Group ID (MLS): {}", hex::encode(group_id.as_slice()));
+                    }
+                    println!("  Group ID (Nostr): {}", conv.id);
+                    println!("  Participants: {}", conv.participants.len());
+                    println!("");
+                }
             }
         }
         _ => unreachable!(),
