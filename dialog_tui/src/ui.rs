@@ -101,13 +101,19 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 }
 
 fn draw_search_suggestions(f: &mut Frame, input_area: Rect, app: &App, _theme: &Theme) {
-    let suggestions = app.get_search_suggestions();
-    if suggestions.is_empty() {
+    let (suggestions_len, title) = if app.is_chat_switching() {
+        let conv_suggestions = app.get_conversation_suggestions();
+        (conv_suggestions.len(), "@ Chat Switcher")
+    } else {
+        (0, "@ Contact Search")
+    };
+
+    if suggestions_len == 0 {
         return;
     }
 
     // Calculate popup area - position it above the input area
-    let suggestion_height = std::cmp::min(suggestions.len() + 2, 8) as u16; // +2 for borders, max 8 high
+    let suggestion_height = std::cmp::min(suggestions_len + 2, 8) as u16; // +2 for borders, max 8 high
     let popup_width = std::cmp::min(60, input_area.width.saturating_sub(4)); // Leave some margin
     
     let popup_area = Rect {
@@ -122,7 +128,7 @@ fn draw_search_suggestions(f: &mut Frame, input_area: Rect, app: &App, _theme: &
 
     // Create suggestion items
     let selected_idx = app.get_selected_suggestion();
-    let items: Vec<ListItem> = suggestions
+    let items: Vec<ListItem> = app.get_conversation_suggestions()
         .iter()
         .enumerate()
         .map(|(i, suggestion)| {
@@ -142,7 +148,7 @@ fn draw_search_suggestions(f: &mut Frame, input_area: Rect, app: &App, _theme: &
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("@ Contact Search")
+                .title(title)
                 .title_alignment(Alignment::Left)
                 .border_style(Style::default().fg(Color::Yellow))
                 .style(Style::default().bg(Color::DarkGray))

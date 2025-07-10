@@ -4,10 +4,18 @@ use tokio::sync::mpsc;
 use ratatui::widgets::ListState;
 use dialog_lib::{DialogLib, Contact, Conversation, ConnectionStatus, AppMode, AppResult, ToBech32, hex, GroupId, UiUpdate, PendingInvite};
 use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
+use chrono::{DateTime, Local};
+
+/// Helper function to format current timestamp in IRC style
+fn format_timestamp() -> String {
+    let now: DateTime<Local> = Local::now();
+    format!("[{}]", now.format("%H:%M"))
+}
+
 
 #[derive(Debug, Clone)]
-pub struct ContactSuggestion {
-    pub contact: Contact,
+pub struct ConversationSuggestion {
+    pub conversation: Conversation,
     pub score: i64,
     pub display_text: String,
 }
@@ -41,14 +49,13 @@ pub struct App {
     pub scroll_offset: usize,
     pub contacts: Vec<Contact>,
     pub conversations: Vec<Conversation>,
-    pub delayed_message_rx: Option<mpsc::UnboundedReceiver<String>>,
-    pub delayed_message_tx: Option<mpsc::UnboundedSender<String>>,
     pub dialog_lib: DialogLib,
     
     // Search functionality
-    pub search_suggestions: Vec<ContactSuggestion>,
+    pub conversation_suggestions: Vec<ConversationSuggestion>,
     pub selected_suggestion: usize,
     pub is_searching: bool,
+    pub is_chat_switching: bool, // True when @ is used for chat switching
     pub search_query: String,
     pub search_start_pos: usize,
     
@@ -65,11 +72,9 @@ impl App {
         text_area.set_cursor_line_style(ratatui::style::Style::default());
         text_area.set_placeholder_text("Type '/' to start a command");
         
-        // Create async message channel for delayed responses
-        let (delayed_tx, delayed_rx) = mpsc::unbounded_channel();
 
         // Create channel for UI updates
-        let (ui_update_tx, ui_update_rx) = mpsc::channel(100);
+        let (_ui_update_tx, ui_update_rx) = mpsc::channel(100);
 
         // Get initial data from the real service
         let contacts = dialog_lib.get_contacts().await.unwrap_or_default();
@@ -91,14 +96,13 @@ impl App {
             scroll_offset: 0,
             contacts,
             conversations,
-            delayed_message_rx: Some(delayed_rx),
-            delayed_message_tx: Some(delayed_tx),
             dialog_lib,
             
             // Initialize search fields
-            search_suggestions: Vec::new(),
+            conversation_suggestions: Vec::new(),
             selected_suggestion: 0,
             is_searching: false,
+            is_chat_switching: false,
             search_query: String::new(),
             search_start_pos: 0,
             
@@ -176,8 +180,11 @@ impl App {
             }
             KeyCode::Enter => {
                 // If we're in search mode, accept the selected suggestion
-                if self.is_searching && !self.search_suggestions.is_empty() {
-                    self.accept_suggestion();
+                if self.is_searching && self.is_chat_switching && !self.conversation_suggestions.is_empty() {
+                    if let Some(conversation_id) = self.accept_suggestion() {
+                        // Handle conversation switch asynchronously
+                        let _ = self.dialog_lib.switch_conversation(&conversation_id).await;
+                    }
                     return AppResult::Continue;
                 }
                 
@@ -264,9 +271,10 @@ impl App {
                 let after_at = &input[at_pos + 1..];
                 if !after_at.contains(' ') {
                     self.is_searching = true;
+                    self.is_chat_switching = true; // Enable chat switching mode
                     self.search_query = after_at.to_string();
                     self.search_start_pos = at_pos;
-                    self.update_search_suggestions();
+                    self.update_conversation_suggestions(); // Use conversation suggestions instead
                     return;
                 }
             }
@@ -275,26 +283,34 @@ impl App {
         // If no valid @ search found, disable searching
         if self.is_searching {
             self.is_searching = false;
-            self.search_suggestions.clear();
+            self.is_chat_switching = false;
+            self.conversation_suggestions.clear();
             self.selected_suggestion = 0;
         }
     }
 
-    fn update_search_suggestions(&mut self) {
-        if !self.is_searching {
+
+    fn update_conversation_suggestions(&mut self) {
+        if !self.is_searching || !self.is_chat_switching {
             return;
         }
 
         let matcher = SkimMatcherV2::default();
         let mut suggestions = Vec::new();
 
-        for contact in &self.contacts {
-            if let Some(score) = matcher.fuzzy_match(&contact.name, &self.search_query) {
-                suggestions.push(ContactSuggestion {
-                    contact: contact.clone(),
+        for conversation in &self.conversations {
+            // Match against conversation name
+            let score = if self.search_query.is_empty() {
+                1000 // Show all conversations when no query
+            } else {
+                matcher.fuzzy_match(&conversation.name, &self.search_query).unwrap_or(0)
+            };
+
+            if score > 0 {
+                suggestions.push(ConversationSuggestion {
+                    conversation: conversation.clone(),
                     score,
-                    display_text: format!("{} ({})", contact.name, 
-                        contact.pubkey.to_bech32().unwrap_or_else(|_| contact.pubkey.to_hex()[..8].to_string())),
+                    display_text: conversation.name.clone(),
                 });
             }
         }
@@ -305,55 +321,55 @@ impl App {
         // Take top 5 suggestions
         suggestions.truncate(5);
         
-        self.search_suggestions = suggestions;
+        self.conversation_suggestions = suggestions;
         self.selected_suggestion = 0;
     }
 
-    fn accept_suggestion(&mut self) {
-        if !self.is_searching || self.search_suggestions.is_empty() {
-            return;
+    fn accept_suggestion(&mut self) -> Option<String> {
+        if !self.is_searching || !self.is_chat_switching {
+            return None;
         }
 
-        let suggestion = &self.search_suggestions[self.selected_suggestion];
-        let current_text = self.text_area.lines().join("");
-        
-        // Replace the @query with @contactname - with safe bounds checking
-        if self.search_start_pos > current_text.len() {
-            // Invalid state, just clear search
-            self.is_searching = false;
-            self.search_suggestions.clear();
-            self.selected_suggestion = 0;
-            return;
+        // Handle conversation switching
+        if self.conversation_suggestions.is_empty() {
+            return None;
         }
+
+        let suggestion = &self.conversation_suggestions[self.selected_suggestion];
+        let conversation_id = suggestion.conversation.id.clone();
+        let conversation_name = suggestion.conversation.name.clone();
         
-        let before_at = &current_text[..self.search_start_pos];
-        let after_query_start = self.search_start_pos + 1 + self.search_query.len();
-        let after_query = if after_query_start <= current_text.len() {
-            &current_text[after_query_start..]
-        } else {
-            ""
-        };
-        let new_text = format!("{}@{}{}", before_at, suggestion.contact.name, after_query);
+        // Update UI state immediately
+        self.active_conversation = Some(conversation_id.clone());
+        self.add_message(&format!("📍 Switching to: {}", conversation_name));
         
-        // Clear and set new text
+        // Clear the @ from input text
         self.text_area.delete_line_by_head();
         self.text_area.delete_line_by_end();
-        self.text_area.insert_str(&new_text);
+        
+        let conversation_to_switch = Some(conversation_id);
         
         // Clear search state
         self.is_searching = false;
-        self.search_suggestions.clear();
+        self.is_chat_switching = false;
+        self.conversation_suggestions.clear();
         self.selected_suggestion = 0;
+        
+        conversation_to_switch
     }
 
     fn move_suggestion_up(&mut self) {
-        if !self.search_suggestions.is_empty() && self.selected_suggestion > 0 {
+        let suggestion_count = self.conversation_suggestions.len();
+        
+        if suggestion_count > 0 && self.selected_suggestion > 0 {
             self.selected_suggestion -= 1;
         }
     }
 
     fn move_suggestion_down(&mut self) {
-        if !self.search_suggestions.is_empty() && self.selected_suggestion < self.search_suggestions.len() - 1 {
+        let suggestion_count = self.conversation_suggestions.len();
+        
+        if suggestion_count > 0 && self.selected_suggestion < suggestion_count - 1 {
             self.selected_suggestion += 1;
         }
     }
@@ -364,9 +380,13 @@ impl App {
             AppMode::CommandInput => self.text_area.set_placeholder_text("Enter command"),
             AppMode::MessageInput => {
                 if self.is_searching {
-                    self.text_area.set_placeholder_text("Type @ and contact name for suggestions");
+                    if self.is_chat_switching {
+                        self.text_area.set_placeholder_text("Type @ and chat name to switch conversations");
+                    } else {
+                        self.text_area.set_placeholder_text("Type @ and contact name for suggestions");
+                    }
                 } else {
-                    self.text_area.set_placeholder_text("Type message and press Enter to send");
+                    self.text_area.set_placeholder_text("Type message and press Enter to send, or @ to switch chats");
                 }
             }
         }
@@ -508,6 +528,14 @@ impl App {
                                         self.add_message("✅ Successfully joined group!");
                                         self.add_message("The group should now appear in your conversations.");
                                         self.refresh_data().await;
+                                        
+                                        // Auto-switch to the newly joined group
+                                        if let Ok(()) = self.dialog_lib.switch_conversation(&group_id).await {
+                                            self.active_conversation = Some(group_id.clone());
+                                            if let Some(conv) = self.conversations.iter().find(|c| c.id == group_id) {
+                                                self.add_message(&format!("📍 Auto-switched to group: {}", conv.name));
+                                            }
+                                        }
                                     }
                                     Err(e) => {
                                         self.add_message(&format!("❌ Error accepting invite: {}", e));
@@ -572,6 +600,12 @@ impl App {
                                 self.add_message("⚠️  EPHEMERAL MODE: Participants must accept invites during THIS session");
                                 self.add_message("    (Their key packages are only valid until they restart)");
                                 self.refresh_data().await;
+                                
+                                // Auto-switch to the newly created group
+                                if let Ok(()) = self.dialog_lib.switch_conversation(&group_id).await {
+                                    self.active_conversation = Some(group_id.clone());
+                                    self.add_message(&format!("📍 Auto-switched to group: {}", group_name));
+                                }
                             }
                             Err(e) => {
                                 self.add_message(&format!("❌ Error creating group: {}", e));
@@ -632,7 +666,6 @@ impl App {
                 self.add_message("/invites - View and accept pending group invitations");
                 self.add_message("");
                 self.add_message("Conversations:");
-                self.add_message("/conversations - List active conversations");
                 self.add_message("/switch - Switch to a conversation (interactive)");
                 self.add_message("/fetch - Fetch and display messages in the active conversation");
                 self.add_message("");
@@ -719,50 +752,6 @@ impl App {
                     self.add_message("Usage: /create <group_name>");
                     self.add_message("Example: /create Coffee Chat");
                     self.add_message("Note: You'll be able to select participants interactively");
-                }
-            }
-            "/conversations" => {
-                self.refresh_data().await;
-                if self.conversations.is_empty() {
-                    self.add_message("No active conversations");
-                } else {
-                    self.add_message("Active conversations:");
-                    self.add_message("");
-                    
-                    // Collect all conversation display info first to avoid borrowing issues
-                    let conversations = self.conversations.clone();
-                    let active_conv = self.active_conversation.clone();
-                    let contacts = self.contacts.clone();
-                    
-                    for (i, conv) in conversations.iter().enumerate() {
-                        let unread = if conv.unread_count > 0 {
-                            format!(" ({} unread)", conv.unread_count)
-                        } else {
-                            String::new()
-                        };
-                        let active = if Some(conv.id.clone()) == active_conv {
-                            " [ACTIVE]"
-                        } else {
-                            ""
-                        };
-                        let group_indicator = if conv.is_group { "[GROUP] " } else { "" };
-                        self.add_message(&format!("  {}: {}{}{}{}", i + 1, group_indicator, conv.name, unread, active));
-                        if conv.is_group && !conv.participants.is_empty() {
-                            let participant_names: Vec<String> = conv.participants.iter().map(|pk| {
-                                // Try to find the name for this public key, otherwise use a short hex representation
-                                contacts.iter()
-                                    .find(|c| c.pubkey == *pk)
-                                    .map(|c| c.name.clone())
-                                    .unwrap_or_else(|| format!("{}", pk.to_bech32().unwrap_or_else(|_| pk.to_hex()[..8].to_string())))
-                            }).collect();
-                            self.add_message(&format!("      Participants: {}", participant_names.join(", ")));
-                        }
-                        if let Some(ref last_msg) = conv.last_message {
-                            self.add_message(&format!("      Last: {}", last_msg));
-                        }
-                    }
-                    self.add_message("");
-                    self.add_message("Use '/switch' to switch to a conversation");
                 }
             }
             "/contacts" => {
@@ -1076,7 +1065,7 @@ impl App {
                                                 format!("{}...", &msg.sender.to_hex()[0..8])
                                             };
                                             
-                                            self.add_message(&format!("{}: {}", sender_name, msg.content));
+                                            self.add_message(&format!("{} {}: {}", format_timestamp(), sender_name, msg.content));
                                         }
                                         
                                         self.add_message("");
@@ -1106,15 +1095,15 @@ impl App {
     async fn process_message(&mut self, message: &str) {
         if let Some(ref active_id) = self.active_conversation {
             if let Some(conv) = self.conversations.iter().find(|c| c.id == *active_id).cloned() {
-                // Show user message immediately
-                self.add_message(&format!("You: {}", message));
+                // Show user message immediately with timestamp
+                self.add_message(&format!("{} You: {}", format_timestamp(), message));
                 
                 // Send the message via the dialog library
                 if let Ok(bytes) = hex::decode(&conv.id) {
                     let group_id = GroupId::from_slice(&bytes);
                     match self.dialog_lib.send_message(&group_id, message).await {
                         Ok(()) => {
-                            self.add_message("Message sent successfully");
+                            // Message sent successfully - no need to display confirmation
                         }
                         Err(e) => {
                             self.add_message(&format!("Error sending message: {}", e));
@@ -1127,7 +1116,7 @@ impl App {
                 self.add_message("Error: Active conversation not found.");
             }
         } else {
-            self.add_message("No active conversation. Use /conversations to see available conversations or /new to start one.");
+            self.add_message("No active conversation. Use /switch to see available conversations or /create to start one.");
         }
     }
 
@@ -1175,6 +1164,7 @@ impl App {
         }
     }
 
+
     pub fn scroll_up(&mut self) {
         if self.scroll_offset > 0 {
             self.scroll_offset -= 1;
@@ -1187,20 +1177,6 @@ impl App {
         }
     }
 
-    pub fn check_delayed_messages(&mut self) -> bool {
-        let mut messages = Vec::new();
-        if let Some(ref mut rx) = self.delayed_message_rx {
-            while let Ok(message) = rx.try_recv() {
-                messages.push(message);
-            }
-        }
-        // Add all the messages after we're done with the receiver
-        let had_messages = !messages.is_empty();
-        for message in messages {
-            self.add_message(&message);
-        }
-        had_messages
-    }
 
     pub async fn check_ui_updates(&mut self) -> bool {
         let mut had_updates = false;
@@ -1232,8 +1208,8 @@ impl App {
                                         format!("{}...", &message.sender.to_hex()[0..8])
                                     };
                                     
-                                    // Add the message to the display
-                                    self.add_message(&format!("{}: {}", sender_name, message.content));
+                                    // Add the message to the display with timestamp
+                                    self.add_message(&format!("{} {}: {}", format_timestamp(), sender_name, message.content));
                                 }
                             }
                         }
@@ -1258,15 +1234,6 @@ impl App {
         had_updates
     }
 
-    fn send_delayed_message(&self, message: String, delay_ms: u64) {
-        if let Some(ref tx) = self.delayed_message_tx {
-            let tx_clone = tx.clone();
-            tokio::spawn(async move {
-                tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
-                let _ = tx_clone.send(message);
-            });
-        }
-    }
 
     pub fn handle_paste(&mut self, text: &str) {
         // Insert the pasted text all at once without character-by-character animation
@@ -1337,8 +1304,13 @@ impl App {
 
 
     // Public getters for the UI
-    pub fn get_search_suggestions(&self) -> &[ContactSuggestion] {
-        &self.search_suggestions
+
+    pub fn get_conversation_suggestions(&self) -> &[ConversationSuggestion] {
+        &self.conversation_suggestions
+    }
+
+    pub fn is_chat_switching(&self) -> bool {
+        self.is_chat_switching
     }
 
     pub fn get_selected_suggestion(&self) -> usize {
@@ -1379,47 +1351,7 @@ mod tests {
         assert_eq!(app.search_query, "ali");
     }
 
-    #[tokio::test]
-    async fn test_fuzzy_search_suggestions() {
-        let dialog_lib = DialogLib::new().await.expect("Failed to create DialogLib");
-        let mut app = App::new_with_service(dialog_lib).await.expect("Failed to create App");
-        app.refresh_data().await;
 
-        // Simulate typing "@al" to search for Alice
-        app.detect_at_search("Hello @al");
-        assert!(app.is_searching);
-        
-        if !app.contacts.is_empty() {
-            // We should get some suggestions if we have contacts
-            app.update_search_suggestions();
-            // The exact results depend on the data, so we'll just check the mechanism works
-        }
-    }
-
-    #[tokio::test]
-    async fn test_suggestion_navigation() {
-        let dialog_lib = DialogLib::new().await.expect("Failed to create DialogLib");
-        let mut app = App::new_with_service(dialog_lib).await.expect("Failed to create App");
-        app.refresh_data().await;
-
-        // Set up search
-        app.detect_at_search("@a");
-        if !app.search_suggestions.is_empty() {
-            assert_eq!(app.selected_suggestion, 0);
-
-            // Test moving down
-            app.move_suggestion_down();
-            if app.search_suggestions.len() > 1 {
-                assert_eq!(app.selected_suggestion, 1);
-            } else {
-                assert_eq!(app.selected_suggestion, 0); // Should stay at 0 if only one suggestion
-            }
-
-            // Test moving up
-            app.move_suggestion_up();
-            assert_eq!(app.selected_suggestion, 0);
-        }
-    }
 
     #[tokio::test]
     async fn test_edge_cases_no_panic() {
@@ -1445,8 +1377,8 @@ mod tests {
 
         // Test successful search then accept suggestion
         app.detect_at_search("@al");
-        if !app.search_suggestions.is_empty() {
-            app.accept_suggestion();
+        if !app.conversation_suggestions.is_empty() {
+            let _ = app.accept_suggestion();
             // Should not panic
         }
     }

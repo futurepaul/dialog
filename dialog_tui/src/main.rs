@@ -207,9 +207,6 @@ async fn main() -> Result<()> {
 
 async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
     loop {
-        // Check for delayed messages and track if we got any
-        let had_delayed_messages = app.check_delayed_messages();
-        
         // Check for UI updates (real-time messages)
         let had_ui_updates = app.check_ui_updates().await;
         
@@ -233,7 +230,7 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mu
         
         // Small delay to prevent excessive CPU usage when no events
         // If we had delayed messages or UI updates, reduce the delay to make UI more responsive
-        let delay = if had_delayed_messages || had_ui_updates {
+        let delay = if had_ui_updates {
             tokio::time::Duration::from_millis(16) // ~60fps when messages are arriving
         } else {
             tokio::time::Duration::from_millis(16) // Keep consistent ~60fps
