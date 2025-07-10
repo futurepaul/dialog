@@ -60,6 +60,7 @@ pub struct App {
     pub active_conversation: Option<String>,
     pub contact_count: usize,
     pub pending_invites: usize,
+    pub pending_invites_list: Vec<PendingInvite>,
     pub messages: Vec<StatusMessage>,
     pub scroll_offset: usize,
     pub contacts: Vec<Contact>,
@@ -83,6 +84,10 @@ pub struct App {
     // Command history
     pub command_history: Vec<String>,
     pub history_index: Option<usize>,
+    
+    // Sidebar state
+    pub show_sidebar: bool,
+    pub sidebar_selection: usize,
 }
 
 impl App {
@@ -100,6 +105,7 @@ impl App {
         let conversations = dialog_lib.get_conversations().await.unwrap_or_default();
         let connection_status = dialog_lib.get_connection_status().await.unwrap_or(ConnectionStatus::Disconnected);
         let pending_invites = dialog_lib.get_pending_invites_count().await.unwrap_or(0);
+        let pending_invites_list = Vec::new(); // Will be populated when needed
         let active_conversation = dialog_lib.get_active_conversation().await.unwrap_or(None);
 
         // Don't auto-start subscription - let user connect manually
@@ -111,6 +117,7 @@ impl App {
             active_conversation,
             contact_count: contacts.len(),
             pending_invites,
+            pending_invites_list,
             messages: Vec::new(),
             scroll_offset: 0,
             contacts,
@@ -134,6 +141,10 @@ impl App {
             // Command history
             command_history: Vec::new(),
             history_index: None,
+            
+            // Sidebar state
+            show_sidebar: false,
+            sidebar_selection: 0,
         };
 
         // Add welcome messages
@@ -192,6 +203,25 @@ impl App {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 return AppResult::Exit;
             }
+            KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.show_sidebar = !self.show_sidebar;
+                if self.show_sidebar {
+                    // Fetch pending invites when opening sidebar
+                    if self.connection_status == ConnectionStatus::Connected {
+                        if let Ok(result) = self.dialog_lib.list_pending_invites().await {
+                            self.pending_invites_list = result.invites;
+                            self.pending_invites = self.pending_invites_list.len();
+                        }
+                    }
+                    
+                    // Ensure sidebar selection is within bounds
+                    let total_items = self.conversations.len() + self.contacts.len() + self.pending_invites_list.len();
+                    if self.sidebar_selection >= total_items && total_items > 0 {
+                        self.sidebar_selection = 0;
+                    }
+                }
+                return AppResult::Continue;
+            }
             KeyCode::Esc => {
                 if self.mode != AppMode::Normal {
                     self.mode = AppMode::Normal;
@@ -202,6 +232,12 @@ impl App {
                 return AppResult::Continue;
             }
             KeyCode::Enter => {
+                // If sidebar is open, select the current item
+                if self.show_sidebar {
+                    self.sidebar_select().await;
+                    return AppResult::Continue;
+                }
+                
                 // If we're in search mode, accept the selected suggestion
                 if self.is_searching && self.is_chat_switching && !self.conversation_suggestions.is_empty() {
                     if let Some(conversation_id) = self.accept_suggestion() {
@@ -222,7 +258,10 @@ impl App {
                 return AppResult::Continue;
             }
             KeyCode::Up => {
-                if self.is_searching {
+                if self.show_sidebar {
+                    self.sidebar_up();
+                    return AppResult::Continue;
+                } else if self.is_searching {
                     self.move_suggestion_up();
                     return AppResult::Continue;
                 } else if self.mode == AppMode::CommandInput || self.mode == AppMode::MessageInput {
@@ -235,7 +274,10 @@ impl App {
                 }
             }
             KeyCode::Down => {
-                if self.is_searching {
+                if self.show_sidebar {
+                    self.sidebar_down();
+                    return AppResult::Continue;
+                } else if self.is_searching {
                     self.move_suggestion_down();
                     return AppResult::Continue;
                 } else if self.mode == AppMode::CommandInput || self.mode == AppMode::MessageInput {
@@ -718,7 +760,7 @@ impl App {
                 self.add_message("/keypackage - Publish your key package (required for receiving invites)");
                 self.add_message("/refresh-keys - Publish fresh key packages (replaces old ones)");
                 self.add_message("/create <name> - Create a group (with interactive contact selection)");
-                self.add_message("/invites - View and accept pending group invitations");
+                self.add_message("/invites - Open sidebar to view and accept pending invitations");
                 self.add_message("");
                 self.add_message("Conversations:");
                 self.add_message("/switch - Switch to a conversation (interactive)");
@@ -732,6 +774,7 @@ impl App {
                 self.add_message("Navigation:");
                 self.add_message("  PageUp/PageDown - Scroll through messages");
                 self.add_message("  Up/Down arrows - Navigate @ search suggestions or command history");
+                self.add_message("  Ctrl+B - Toggle sidebar for conversations/contacts");
                 self.add_message("  Ctrl+C - Exit");
                 self.add_message("  Esc - Clear input");
                 self.add_message("");
@@ -831,7 +874,7 @@ impl App {
             "/invites" => {
                 // Check if we're connected first
                 if self.connection_status != ConnectionStatus::Connected {
-                    self.add_message("❌ Cannot fetch invites - not connected to relay");
+                    self.add_message_with_type("❌ Cannot fetch invites - not connected to relay", MessageType::Error);
                     self.add_message("Use /connect to establish a connection first");
                     return;
                 }
@@ -848,24 +891,21 @@ impl App {
                             self.add_message("");
                         }
                         
-                        // Then handle the invites
-                        if result.invites.is_empty() {
+                        // Update the invites list
+                        self.pending_invites_list = result.invites;
+                        self.pending_invites = self.pending_invites_list.len();
+                        
+                        if self.pending_invites_list.is_empty() {
                             self.add_message("No pending invites found.");
                         } else {
-                            // Enter selection mode
-                            let mut state = ListState::default();
-                            state.select(Some(0));
-                            self.selection_mode = SelectionMode::InviteSelection {
-                                invites: result.invites.clone(),
-                                state,
-                            };
-                            self.add_message(&format!("You have {} pending invites. Use arrow keys to select, Enter to accept, Esc to cancel.", result.invites.len()));
+                            // Open sidebar and select first invite
+                            self.show_sidebar = true;
+                            self.sidebar_selection = 0; // First item will be the first invite
+                            self.add_message_with_type(&format!("You have {} pending invites. Sidebar opened - use ↑↓ to navigate, Enter to accept.", self.pending_invites), MessageType::Info);
                         }
-                        // Update the pending invites count
-                        self.pending_invites = result.invites.len();
                     }
                     Err(e) => {
-                        self.add_message(&format!("❌ Error fetching invites: {}", e));
+                        self.add_message_with_type(&format!("❌ Error fetching invites: {}", e), MessageType::Error);
                     }
                 }
             }
@@ -1332,6 +1372,58 @@ impl App {
             }
         }
     }
+    
+    pub fn sidebar_up(&mut self) {
+        let total_items = self.conversations.len() + self.contacts.len() + self.pending_invites_list.len();
+        if total_items > 0 && self.sidebar_selection > 0 {
+            self.sidebar_selection -= 1;
+        }
+    }
+    
+    pub fn sidebar_down(&mut self) {
+        let total_items = self.conversations.len() + self.contacts.len() + self.pending_invites_list.len();
+        if total_items > 0 && self.sidebar_selection < total_items - 1 {
+            self.sidebar_selection += 1;
+        }
+    }
+    
+    pub async fn sidebar_select(&mut self) {
+        let conv_count = self.conversations.len();
+        let contact_count = self.contacts.len();
+        
+        if self.sidebar_selection < conv_count {
+            // Selected a conversation
+            if let Some(conv) = self.conversations.get(self.sidebar_selection) {
+                let _ = self.dialog_lib.switch_conversation(&conv.id).await;
+                self.active_conversation = Some(conv.id.clone());
+                self.show_sidebar = false;
+                self.add_message_with_type(&format!("Switched to: {}", conv.name), MessageType::Info);
+            }
+        } else if self.sidebar_selection < conv_count + contact_count {
+            // Selected a contact - could implement DM functionality later
+            let contact_idx = self.sidebar_selection - conv_count;
+            if let Some(contact) = self.contacts.get(contact_idx) {
+                self.add_message_with_type(&format!("Direct messages with {} not yet implemented", contact.name), MessageType::Warning);
+            }
+        } else {
+            // Selected an invite
+            let invite_idx = self.sidebar_selection - conv_count - contact_count;
+            if let Some(invite) = self.pending_invites_list.get(invite_idx).cloned() {
+                self.show_sidebar = false;
+                self.add_message(&format!("Accepting invite for group {}...", invite.group_name));
+                match self.dialog_lib.accept_invite(&hex::encode(invite.group_id.as_slice())).await {
+                    Ok(()) => {
+                        self.add_message_with_type("✅ Successfully joined group!", MessageType::Success);
+                        self.add_message("The group should now appear in your conversations.");
+                        self.refresh_data().await;
+                    }
+                    Err(e) => {
+                        self.add_message_with_type(&format!("Error accepting invite: {}", e), MessageType::Error);
+                    }
+                }
+            }
+        }
+    }
 
 
     pub async fn check_ui_updates(&mut self) -> bool {
@@ -1412,19 +1504,23 @@ impl App {
     }
 
     pub fn get_status_text(&self) -> String {
-        let input_context = match (&self.mode, &self.selection_mode) {
-            (_, SelectionMode::InviteSelection { .. }) => "↑↓ Navigate • Enter: Accept • Esc: Cancel",
-            (_, SelectionMode::ConversationSelection { .. }) => "↑↓ Navigate • Enter: Switch • Esc: Cancel",
-            (_, SelectionMode::ContactSelection { .. }) => "↑↓ Navigate • Space: Toggle • Enter: Create • Esc: Cancel",
-            (AppMode::Normal, _) => "Press / for commands, ? for help",
-            (AppMode::CommandInput, _) => "Command mode • ↑↓ History • Enter: Execute • Esc: Cancel",
-            (AppMode::MessageInput, _) => {
-                if self.is_searching {
-                    "@ search • ↑↓ Navigate • Enter: Select • Esc: Cancel"
-                } else {
-                    "Message mode • Enter: Send • Esc: Cancel"
-                }
-            },
+        let input_context = if self.show_sidebar {
+            "Sidebar • ↑↓ Navigate • Enter: Select • Ctrl+B: Close"
+        } else {
+            match (&self.mode, &self.selection_mode) {
+                (_, SelectionMode::InviteSelection { .. }) => "↑↓ Navigate • Enter: Accept • Esc: Cancel",
+                (_, SelectionMode::ConversationSelection { .. }) => "↑↓ Navigate • Enter: Switch • Esc: Cancel",
+                (_, SelectionMode::ContactSelection { .. }) => "↑↓ Navigate • Space: Toggle • Enter: Create • Esc: Cancel",
+                (AppMode::Normal, _) => "Press / for commands, ? for help",
+                (AppMode::CommandInput, _) => "Command mode • ↑↓ History • Enter: Execute • Esc: Cancel",
+                (AppMode::MessageInput, _) => {
+                    if self.is_searching {
+                        "@ search • ↑↓ Navigate • Enter: Select • Esc: Cancel"
+                    } else {
+                        "Message mode • Enter: Send • Esc: Cancel"
+                    }
+                },
+            }
         };
 
         let conversation_info = match &self.active_conversation {

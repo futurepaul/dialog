@@ -14,6 +14,24 @@ use crate::{
 pub fn draw(f: &mut Frame, app: &App) {
     let theme = Theme::claude_code();
     
+    // Create horizontal split if sidebar is shown
+    let main_area = if app.show_sidebar {
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(30), // Sidebar width
+                Constraint::Min(1),     // Main area
+            ])
+            .split(f.area());
+        
+        // Draw sidebar
+        draw_sidebar(f, chunks[0], app, &theme);
+        
+        chunks[1]
+    } else {
+        f.area()
+    };
+    
     // Create fullscreen layout with messages area, input area, and status bar
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -22,7 +40,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             Constraint::Length(3), // Text input area (with borders)
             Constraint::Length(1), // Status bar
         ])
-        .split(f.area());
+        .split(main_area);
 
     // Draw messages area
     draw_messages(f, chunks[0], app, &theme);
@@ -42,6 +60,92 @@ pub fn draw(f: &mut Frame, app: &App) {
     if !matches!(app.selection_mode, SelectionMode::None) {
         draw_selection_mode(f, app, &theme);
     }
+}
+
+fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    let sidebar_block = Block::default()
+        .borders(Borders::ALL)
+        .title("Sidebar (Ctrl+B)")
+        .border_style(theme.border_focused_style());
+    
+    let inner_area = sidebar_block.inner(area);
+    
+    // We could split sidebar into sections if needed, but for now we'll use a simple list
+    
+    let mut items = Vec::new();
+    let mut current_idx = 0;
+    
+    // Add pending invites first (they're more important/time-sensitive)
+    if !app.pending_invites_list.is_empty() {
+        items.push(ListItem::new("─── Pending Invites ───").style(Style::default().fg(Color::Yellow)));
+        for invite in &app.pending_invites_list {
+            let style = if current_idx == app.sidebar_selection {
+                Style::default().bg(Color::Rgb(50, 50, 50)).fg(Color::White)
+            } else {
+                Style::default().fg(Color::Yellow)
+            };
+            
+            let inviter_info = if let Some(inviter) = &invite.inviter {
+                format!(" from {}", &inviter.to_hex()[0..8])
+            } else {
+                String::new()
+            };
+            
+            items.push(ListItem::new(format!("  🎫 {}{} ({} members)", 
+                invite.group_name, 
+                inviter_info,
+                invite.member_count
+            )).style(style));
+            current_idx += 1;
+        }
+        items.push(ListItem::new(""));
+    }
+    
+    // Add conversations
+    if !app.conversations.is_empty() {
+        items.push(ListItem::new("─── Conversations ───").style(Style::default().fg(Color::Gray)));
+        for conv in &app.conversations {
+            let style = if current_idx == app.sidebar_selection {
+                Style::default().bg(Color::Rgb(50, 50, 50)).fg(Color::White)
+            } else if Some(&conv.id) == app.active_conversation.as_ref() {
+                Style::default().fg(Color::Green)
+            } else {
+                Style::default()
+            };
+            
+            let prefix = if Some(&conv.id) == app.active_conversation.as_ref() { "● " } else { "  " };
+            let unread_indicator = if conv.unread_count > 0 { 
+                format!(" ({})", conv.unread_count) 
+            } else { 
+                String::new() 
+            };
+            
+            items.push(ListItem::new(format!("{}{}{}", prefix, conv.name, unread_indicator)).style(style));
+            current_idx += 1;
+        }
+        items.push(ListItem::new(""));
+    }
+    
+    // Add contacts
+    if !app.contacts.is_empty() {
+        items.push(ListItem::new("─── Contacts ───").style(Style::default().fg(Color::Gray)));
+        for contact in &app.contacts {
+            let style = if current_idx == app.sidebar_selection {
+                Style::default().bg(Color::Rgb(50, 50, 50)).fg(Color::White)
+            } else {
+                Style::default()
+            };
+            
+            let online_indicator = if contact.online { "●" } else { "○" };
+            items.push(ListItem::new(format!("  {} {}", online_indicator, contact.name)).style(style));
+            current_idx += 1;
+        }
+    }
+    
+    let list = List::new(items);
+    
+    f.render_widget(sidebar_block, area);
+    f.render_widget(list, inner_area);
 }
 
 fn draw_messages(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
