@@ -1,0 +1,23 @@
+[package]
+name = "whitenoise-dialog-integration"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { workspace = true }
+anyhow = "1.0"
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+futures = "0.3"
+
+# Nostr dependencies
+nostr = { workspace = true }
+nostr-sdk = { workspace = true }
+nostr-mls = { workspace = true }
+
+# Local dependencies
+dialog_lib = { path = "../dialog_lib" }
+whitenoise = { path = "../../whitenoise" }
+
+[dev-dependencies]
+tempfile = "3.0"

@@ -33,4 +33,7 @@ pub trait MlsService: Send + Sync + std::fmt::Debug {
     
     // Real-time message subscription
     async fn subscribe_to_groups(&self, ui_sender: mpsc::Sender<UiUpdate>) -> Result<()>;
+    
+    // Refresh subscriptions after group changes
+    async fn refresh_subscriptions(&self) -> Result<()>;
 }

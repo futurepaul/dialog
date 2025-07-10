@@ -7,9 +7,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Default library created");
 
     // Example 2: Using environment variables
-    // Set DIALOG_RELAY_URL=wss://my-relay.com
+    // Set DIALOG_RELAY_URLS=wss://my-relay.com,wss://backup-relay.com
     let config = DialogConfig::from_env();
-    let lib_env = DialogLib::new_with_relay(config.relay_url).await?;
+    let relay_url = config.relay_urls.first().unwrap().clone();
+    let lib_env = DialogLib::new_with_relay(relay_url).await?;
     println!("Library created from environment variables");
 
     // Example 3: Using custom relay URL

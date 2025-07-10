@@ -1,5 +1,5 @@
 use clap::{Arg, Command};
-use dialog_lib::{DialogLib, StorageBackend, Keys, PublicKey, GroupId, hex};
+use dialog_lib::{DialogLib, StorageBackend, Keys, PublicKey, GroupId, hex, DialogConfig};
 use dotenv::{dotenv, from_path};
 use nostr_sdk::prelude::*;
 use std::{env, path::PathBuf, fs};
@@ -226,7 +226,11 @@ async fn main() -> Result<(), DialogError> {
         )
         .get_matches();
 
-    let relay_url = "ws://localhost:8080";
+    // Use DialogConfig to get relay URLs, respecting environment variables
+    let config = DialogConfig::from_env();
+    let relay_url = config.relay_urls.first()
+        .ok_or(DialogError::General("No relay URLs configured".into()))?
+        .clone();
 
     match matches.subcommand() {
         Some(("publish-key", sub_matches)) => {
@@ -234,7 +238,7 @@ async fn main() -> Result<(), DialogError> {
             let sk_hex = get_secret_key(key_arg)?;
             println!("Using key for: {}", key_arg);
             
-            let dialog_lib = create_dialog_lib(&sk_hex, relay_url).await?;
+            let dialog_lib = create_dialog_lib(&sk_hex, &relay_url).await?;
             
             // Connect to relay
             dialog_lib.connect().await?;
@@ -249,7 +253,7 @@ async fn main() -> Result<(), DialogError> {
         Some(("create-group", sub_matches)) => {
             let key_arg = sub_matches.get_one::<String>("key").unwrap();
             let sk_hex = get_secret_key(key_arg)?;
-            let dialog_lib = create_dialog_lib(&sk_hex, relay_url).await?;
+            let dialog_lib = create_dialog_lib(&sk_hex, &relay_url).await?;
             println!("Using key for: {}", key_arg);
 
             // Connect to relay
@@ -267,7 +271,7 @@ async fn main() -> Result<(), DialogError> {
         Some(("send-message", sub_matches)) => {
             let key_arg = sub_matches.get_one::<String>("key").unwrap();
             let sk_hex = get_secret_key(key_arg)?;
-            let dialog_lib = create_dialog_lib(&sk_hex, relay_url).await?;
+            let dialog_lib = create_dialog_lib(&sk_hex, &relay_url).await?;
             println!("Using key for: {}", key_arg);
 
             // Connect to relay
@@ -304,7 +308,7 @@ async fn main() -> Result<(), DialogError> {
         Some(("list-invites", sub_matches)) => {
             let key_arg = sub_matches.get_one::<String>("key").unwrap();
             let sk_hex = get_secret_key(key_arg)?;
-            let dialog_lib = create_dialog_lib(&sk_hex, relay_url).await?;
+            let dialog_lib = create_dialog_lib(&sk_hex, &relay_url).await?;
             println!("Listing invites for: {}", key_arg);
 
             // Connect to relay
@@ -337,7 +341,7 @@ async fn main() -> Result<(), DialogError> {
         Some(("accept-invite", sub_matches)) => {
             let key_arg = sub_matches.get_one::<String>("key").unwrap();
             let sk_hex = get_secret_key(key_arg)?;
-            let dialog_lib = create_dialog_lib(&sk_hex, relay_url).await?;
+            let dialog_lib = create_dialog_lib(&sk_hex, &relay_url).await?;
             println!("Accepting invite for: {}", key_arg);
 
             // Connect to relay
@@ -357,7 +361,7 @@ async fn main() -> Result<(), DialogError> {
         Some(("get-messages", sub_matches)) => {
             let key_arg = sub_matches.get_one::<String>("key").unwrap();
             let sk_hex = get_secret_key(key_arg)?;
-            let dialog_lib = create_dialog_lib(&sk_hex, relay_url).await?;
+            let dialog_lib = create_dialog_lib(&sk_hex, &relay_url).await?;
             println!("Getting messages for: {}", key_arg);
 
             // Connect to relay
@@ -406,7 +410,7 @@ async fn main() -> Result<(), DialogError> {
         Some(("list-groups", sub_matches)) => {
             let key_arg = sub_matches.get_one::<String>("key").unwrap();
             let sk_hex = get_secret_key(key_arg)?;
-            let dialog_lib = create_dialog_lib(&sk_hex, relay_url).await?;
+            let dialog_lib = create_dialog_lib(&sk_hex, &relay_url).await?;
             println!("Listing groups for: {}", key_arg);
 
             let conversations = dialog_lib.get_conversations().await?;
