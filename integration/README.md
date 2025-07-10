@@ -1,280 +1,104 @@
-# Whitenoise-Dialog Interoperability Integration
+# Dialog TUI-CLI Interoperability Testing
 
-This directory contains comprehensive integration tests and automation for achieving true interoperability between **whitenoise** and **dialog_tui** nostr-mls clients.
+This directory documents the manual testing process for verifying interoperability between dialog_tui and dialog_cli.
 
-## Quick Start: Dialog TUI-CLI Interop Test
+## Prerequisites
 
-### One-liner Rust Test
-```bash
-cargo test --package integration --test tui_cli_interop -- --nocapture
-```
-
-### One-liner Bash Test
-```bash
-./integration/test_automated_interop.sh
-```
-
-## Requirements
-
+- Rust toolchain installed
 - `nak` CLI tool installed (`cargo install nak`)
-- `expect` tool installed (usually pre-installed on macOS/Linux)
-- Rust toolchain
-- No services running on ports 10547, 8080, or 7777
+- Three terminal windows available
+- No services running on port 10547
 
-## What the Automated Test Does
+## Manual Test Process
 
-1. Starts a local Nostr relay using `nak serve`
-2. Launches dialog_tui with Alice's key in automated mode using `expect`
-3. Uses dialog_cli with Bob's key to:
-   - Publish key packages
-   - Create a group and invite Alice
-   - Send a message
-4. Verifies that:
-   - Alice receives and accepts the group invite
-   - Alice receives Bob's message
-   - Alice responds with her own message
-   - Bob can fetch and see Alice's response
-5. Cleans up all processes
-
-## Test Output
-
-A successful test will show:
-```
-✅ Test PASSED: Bidirectional messaging verified!
-```
-
-## Overview
-
-The integration test suite implements the scenarios outlined in `../whitenoise_interop_prd.md` using ht-mcp automation to control dialog_tui interactions and coordinate with whitenoise integration tests.
-
-## Architecture
-
-```
-integration/
-├── src/
-│   ├── ht_mcp_automation.rs      # ht-mcp client for dialog_tui control
-│   ├── whitenoise_interop.rs     # Core interop test scenarios
-│   ├── test_scenarios.rs         # Complete test scenario orchestration
-│   ├── whitenoise_coordination.rs # Functions for whitenoise integration_test.rs
-│   ├── welcome_compatibility.rs   # Enhanced welcome message processing
-│   └── lib.rs                    # Main library interface
-├── tests/
-│   └── whitenoise_integration_test.rs # Integration tests for whitenoise
-├── Cargo.toml                    # Dependencies (dialog_lib + whitenoise)
-└── README.md                     # This file
-```
-
-## Key Components
-
-### 1. ht-mcp Automation (`ht_mcp_automation.rs`)
-
-Provides automated control of dialog_tui via ht-mcp sessions:
-
-- Create dialog_tui sessions with specific keys and relay configurations
-- Automate setup (connect, publish key packages, get pubkey)
-- Simulate user interactions (accept invites, send messages, create groups)
-- Take snapshots and wait for specific text patterns
-- Clean session management
-
-### 2. Test Scenarios (`test_scenarios.rs`)
-
-Comprehensive test scenario orchestration:
-
-- **Complete Interop Test**: Full round-trip testing both directions
-- **Stress Testing**: Rapid message exchange under load
-- **Error Recovery**: Network issues and reconnection scenarios
-- **Coordination Helpers**: Bridge between whitenoise and dialog_tui automation
-
-### 3. Whitenoise Coordination (`whitenoise_coordination.rs`)
-
-Functions designed to be integrated into whitenoise's `integration_test.rs`:
-
-```rust
-// Get dialog_tui ready for whitenoise invitation
-let dialog_pubkey = get_dialog_tui_pubkey_for_whitenoise("alice").await?;
-
-// Create whitenoise group with dialog_tui member
-let group_id = whitenoise.create_group(&account, vec![dialog_pubkey], admins, config).await?;
-
-// Wait for dialog_tui to accept and join
-wait_for_dialog_tui_to_join_group(&group_id, &dialog_pubkey).await?;
-
-// Verify message delivery both ways
-let responses = wait_for_dialog_tui_response(&group_id).await?;
-```
-
-### 4. Welcome Compatibility (`welcome_compatibility.rs`)
-
-Enhanced welcome message processing for improved compatibility:
-
-- Process both gift-wrapped (whitenoise) and direct (dialog_tui) welcome formats
-- Dual-format welcome sending for maximum compatibility
-- Validation and error handling for different welcome types
-- Integration helpers for dialog_lib enhancement
-
-## Test Scenarios
-
-### Scenario 1: Whitenoise Creates → Dialog Joins
-
-1. Setup dialog_tui via ht-mcp automation
-2. Extract dialog_tui pubkey for whitenoise
-3. Whitenoise creates group and invites dialog_tui
-4. Dialog_tui accepts invitation automatically
-5. Bi-directional message exchange verification
-
-### Scenario 2: Dialog Creates → Whitenoise Joins
-
-1. Setup dialog_tui via ht-mcp automation  
-2. Dialog_tui creates group and invites whitenoise
-3. Whitenoise accepts invitation (via integration test)
-4. Message exchange verification
-
-### Scenario 3: Stress Testing
-
-- Rapid message bursts from both clients
-- Concurrent group operations
-- Network recovery scenarios
-- Long-running stability testing
-
-## Usage
-
-### Running Integration Tests
+### Terminal 1: Start Local Relay
 
 ```bash
-# Run complete test suite
-cd integration
-cargo run
-
-# Run specific test scenarios
-cargo test --test whitenoise_integration_test
+nak serve --verbose
 ```
 
-### Integrating with Whitenoise
+This starts a Nostr relay on `ws://localhost:10547`.
 
-Copy functions from `whitenoise_coordination.rs` into whitenoise's `integration_test.rs`:
-
-```rust
-// In whitenoise/tests/integration_test.rs
-use whitenoise_dialog_integration::whitenoise_coordination::*;
-
-#[tokio::test]
-async fn test_dialog_tui_interop() -> Result<()> {
-    // Use coordination functions
-    let dialog_pubkey = get_dialog_tui_pubkey_for_whitenoise("alice").await?;
-    // ... rest of test
-}
-```
-
-### Environment Setup
-
-Required infrastructure:
+### Terminal 2: Start dialog_tui with Alice
 
 ```bash
-# Terminal 1: Start whitenoise relays
-cd ~/dev/heavy/whitenoise
-docker compose up  # Ports 7777, 8080
-
-# Terminal 2: Start backup relay
-cd ~/dev/heavy/denoise
-nak serve --verbose  # Port 10547
-
-# Terminal 3: Run integration tests
-cd ~/dev/heavy/denoise/integration
-cargo run
+cargo run --bin dialog_tui -- --key alice
 ```
 
-## Key Features
+Once the TUI starts:
+1. Wait for "Connected to relay successfully!" message
+2. Note that key packages are automatically published
+3. Use `/pk` command to get Alice's public key (you'll need the hex format)
 
-### Automated Dialog_TUI Control
-
-- ht-mcp session management with proper cleanup
-- Interactive command simulation (navigation, selection)
-- Real-time text pattern waiting and verification
-- Snapshot capture for debugging
-
-### Whitenoise Integration
-
-- Direct integration with existing whitenoise test infrastructure
-- Minimal changes required to whitenoise codebase
-- Coordination functions designed for easy integration
-- Proper error handling and timeouts
-
-### Welcome Message Enhancement
-
-- Dual-format welcome processing (gift-wrapped + direct)
-- Compatibility validation and error recovery
-- Enhanced subscription filters for multiple formats
-- Integration hooks for dialog_lib enhancement
-
-### Comprehensive Testing
-
-- End-to-end scenario coverage
-- Performance and stress testing
-- Error recovery and network issue simulation
-- Cross-client verification and validation
-
-## Configuration
-
-### Relay Configuration
-
-Tests use multiple relay configurations for robustness:
-
-- Primary: `ws://localhost:8080,ws://localhost:7777` (whitenoise relays)
-- Backup: `ws://localhost:10547` (nak serve)
-
-### Test Keys
-
-- `alice`: Primary test user for whitenoise→dialog scenarios
-- `bob`: Secondary test user for dialog→whitenoise scenarios
-- `charlie`: Stress testing user
-- `*_dialog`: Dialog_tui specific test users
-
-## Debugging
-
-### Logging
-
-All modules use structured logging:
+### Terminal 3: Use dialog_cli with Bob
 
 ```bash
-RUST_LOG=debug cargo run  # Detailed logging
-RUST_LOG=whitenoise_dialog_integration=trace cargo test  # Module-specific
+# 1. Publish Bob's key packages
+cargo run --bin dialog_cli -- publish-key --key bob
+
+# 2. Create a group and invite Alice (replace with Alice's actual pubkey)
+cargo run --bin dialog_cli -- create-group --key bob --name "Test Group" --counterparty <alice_pubkey_hex>
+
+# Note the Group ID from the output
+
+# 3. Send a message
+cargo run --bin dialog_cli -- send-message --key bob --group-id <group_id> --message "Hello from CLI!"
+
+# 4. Fetch messages to see the conversation
+cargo run --bin dialog_cli -- get-messages --key bob --group-id <group_id>
 ```
 
-### ht-mcp Sessions
+### In dialog_tui (Terminal 2)
 
-List active sessions:
+1. You should see "New group invitation received!"
+2. Type `/invites` to view pending invites
+3. Press Enter to accept the invite
+4. You should automatically switch to the group and see Bob's message
+5. Type a message and press Enter to send a response
+6. Use `/fetch` if needed to ensure messages are synced
+
+### Verify in dialog_cli (Terminal 3)
+
 ```bash
-ht list-sessions
+# Fetch messages again to see Alice's response
+cargo run --bin dialog_cli -- get-messages --key bob --group-id <group_id>
 ```
 
-Take manual snapshots:
-```bash
-ht take-snapshot <session-id>
-```
+## What This Tests
 
-### Message Verification
+✅ **Group Creation**: CLI can create groups  
+✅ **Invite Flow**: TUI receives and can accept invites  
+✅ **Message Delivery**: Messages flow from CLI to TUI  
+✅ **Bidirectional Communication**: TUI can send messages back to CLI  
+✅ **Real-time Updates**: TUI shows messages as they arrive  
 
-The test suite captures and validates:
+## Expected Output
 
-- Message delivery timestamps
-- MLS state synchronization
-- Group membership consistency
-- Welcome message processing
+A successful test shows:
+- Bob's message appears in Alice's TUI
+- Alice's response appears when Bob fetches messages
+- Both clients remain stable and connected
 
-## Contributing
+## Notes
 
-When adding new test scenarios:
+- The TUI uses ephemeral (memory) storage, so state is lost on restart
+- The CLI uses SQLite storage in `.dialog_cli_data/`
+- Both clients connect to the same relay (ws://localhost:10547)
+- Both use the same default relay configuration from dialog_lib
 
-1. Add scenario functions to `test_scenarios.rs`
-2. Add corresponding whitenoise coordination to `whitenoise_coordination.rs`
-3. Update the main test runner in `lib.rs`
-4. Add integration tests to `tests/whitenoise_integration_test.rs`
+## Troubleshooting
 
-## Future Enhancements
+If messages aren't appearing:
+- Ensure both clients show as connected to the relay
+- Try `/fetch` in the TUI to manually sync messages
+- Check that key packages were published successfully
+- Verify you're using the correct group ID
 
-- [ ] Docker-based test environment for CI
-- [ ] Performance metrics collection
-- [ ] Automated regression testing
-- [ ] Multi-relay synchronization testing
-- [ ] Member management (add/remove) testing
-- [ ] Admin permission compatibility testing
+## Future Work
+
+Automated testing with ht-mcp would allow:
+- Programmatic control of dialog_tui
+- Repeatable test execution
+- CI/CD integration
+
+For now, this manual process verifies that interoperability works correctly.
