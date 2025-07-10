@@ -280,6 +280,221 @@ async fn accept_dialog_invite_and_respond() -> Result<()> {
 
 **Prerequisites**: Complete [Dialog CLI Rewrite PRD](dialog_cli_rewrite_prd.md) phases 1-4 first.
 
+### Phase 0: Dialog TUI-CLI Automated Testing (Pre-requisite)
+
+**Goal**: Create a one-liner automated test that verifies dialog_tui ↔ dialog_cli interoperability.
+
+**Implementation**:
+```bash
+# One-liner to run the test
+cargo test --package integration --test tui_cli_interop -- --nocapture
+```
+
+**Test Script** (`integration/tests/tui_cli_interop.rs`):
+```rust
+use tokio::process::Command;
+use std::time::Duration;
+use tokio::time::sleep;
+
+#[tokio::test]
+async fn test_tui_cli_basic_interop() -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Start local relay
+    let mut relay = Command::new("nak")
+        .args(&["serve", "--verbose"])
+        .spawn()?;
+    
+    sleep(Duration::from_secs(2)).await;
+    
+    // 2. Start dialog_tui in background with expect script
+    let tui_script = r#"
+        spawn cargo run --bin dialog_tui -- --key alice
+        expect "Connected to relay successfully"
+        expect "Published 5 key packages"
+        
+        # Wait for invite
+        expect "New group invitation received"
+        send "/invites\r"
+        expect "Test Interop Group"
+        send "\r"
+        expect "Successfully joined group"
+        
+        # Send message
+        expect "75427ab8...: Hello from CLI"
+        send "Hello from TUI!\r"
+        
+        # Keep alive for message verification
+        sleep 5
+    "#;
+    
+    let mut tui = Command::new("expect")
+        .arg("-c")
+        .arg(tui_script)
+        .spawn()?;
+    
+    // Wait for TUI to be ready
+    sleep(Duration::from_secs(5)).await;
+    
+    // 3. Get Alice's pubkey using CLI
+    let pubkey_output = Command::new("cargo")
+        .args(&["run", "--bin", "dialog_cli", "--", "get-pubkey", "--key", "alice"])
+        .output()
+        .await?;
+    
+    let alice_pubkey = String::from_utf8(pubkey_output.stdout)?
+        .lines()
+        .find(|line| line.len() == 64)
+        .expect("Could not find pubkey")
+        .to_string();
+    
+    // 4. Bob publishes key packages
+    Command::new("cargo")
+        .args(&["run", "--bin", "dialog_cli", "--", "publish-key", "--key", "bob"])
+        .output()
+        .await?;
+    
+    // 5. Bob creates group and invites Alice
+    let create_output = Command::new("cargo")
+        .args(&[
+            "run", "--bin", "dialog_cli", "--",
+            "create-group", "--key", "bob",
+            "--name", "Test Interop Group",
+            "--counterparty", &alice_pubkey
+        ])
+        .output()
+        .await?;
+    
+    let output_str = String::from_utf8(create_output.stdout)?;
+    let group_id = output_str
+        .lines()
+        .find(|line| line.contains("Group ID:"))
+        .and_then(|line| line.split_whitespace().last())
+        .expect("Could not find group ID");
+    
+    // 6. Bob sends message
+    Command::new("cargo")
+        .args(&[
+            "run", "--bin", "dialog_cli", "--",
+            "send-message", "--key", "bob",
+            "--group-id", group_id,
+            "--message", "Hello from CLI!"
+        ])
+        .output()
+        .await?;
+    
+    // Wait for TUI to respond
+    sleep(Duration::from_secs(3)).await;
+    
+    // 7. Bob fetches messages to verify TUI response
+    let messages_output = Command::new("cargo")
+        .args(&[
+            "run", "--bin", "dialog_cli", "--",
+            "get-messages", "--key", "bob",
+            "--group-id", group_id
+        ])
+        .output()
+        .await?;
+    
+    let messages = String::from_utf8(messages_output.stdout)?;
+    
+    // Verify both messages exist
+    assert!(messages.contains("Hello from CLI!"), "CLI message not found");
+    assert!(messages.contains("Hello from TUI!"), "TUI response not found");
+    
+    // Cleanup
+    relay.kill().await?;
+    tui.kill().await?;
+    
+    println!("✅ Dialog TUI-CLI interop test passed!");
+    Ok(())
+}
+```
+
+**Alternative Bash Implementation** (`integration/test_automated_interop.sh`):
+```bash
+#!/bin/bash
+set -e
+
+echo "=== Automated Dialog TUI-CLI Interop Test ==="
+
+# Cleanup function
+cleanup() {
+    echo "Cleaning up..."
+    kill $RELAY_PID 2>/dev/null || true
+    kill $TUI_PID 2>/dev/null || true
+}
+trap cleanup EXIT
+
+# 1. Start relay
+nak serve --verbose &
+RELAY_PID=$!
+sleep 2
+
+# 2. Start TUI with automation
+(
+    echo '#!/usr/bin/expect -f
+    spawn cargo run --bin dialog_tui -- --key alice
+    expect "Connected to relay successfully"
+    expect "Published 5 key packages"
+    
+    # Handle invite
+    expect "New group invitation received" {
+        send "/invites\r"
+        expect "Test Interop Group"
+        send "\r"
+        expect "Successfully joined group"
+    }
+    
+    # Send message when we see CLI message
+    expect "75427ab8...: Hello from CLI" {
+        send "Hello from TUI!\r"
+    }
+    
+    # Keep alive
+    expect "impossible_string" { exp_continue }
+    ' | expect -f -
+) &
+TUI_PID=$!
+sleep 5
+
+# 3. Get Alice's pubkey
+ALICE_PUBKEY=$(cargo run --bin dialog_cli -- get-pubkey --key alice 2>/dev/null | grep -E '^[a-f0-9]{64}$' | head -1)
+echo "Alice pubkey: $ALICE_PUBKEY"
+
+# 4. Bob workflow
+cargo run --bin dialog_cli -- publish-key --key bob
+GROUP_ID=$(cargo run --bin dialog_cli -- create-group --key bob --name "Test Interop Group" --counterparty $ALICE_PUBKEY 2>&1 | grep "Group ID:" | awk '{print $NF}')
+echo "Created group: $GROUP_ID"
+
+# 5. Send message and wait
+cargo run --bin dialog_cli -- send-message --key bob --group-id $GROUP_ID --message "Hello from CLI!"
+sleep 3
+
+# 6. Verify messages
+MESSAGES=$(cargo run --bin dialog_cli -- get-messages --key bob --group-id $GROUP_ID 2>/dev/null)
+
+if echo "$MESSAGES" | grep -q "Hello from CLI!" && echo "$MESSAGES" | grep -q "Hello from TUI!"; then
+    echo "✅ Test PASSED: Bidirectional messaging verified!"
+    exit 0
+else
+    echo "❌ Test FAILED: Messages not found"
+    echo "$MESSAGES"
+    exit 1
+fi
+```
+
+**Key Components**:
+- Uses `expect` for TUI automation (or Rust's `rexpect` crate)
+- Fully automated group creation and message exchange
+- Verifies bidirectional communication
+- Single command execution
+- No manual intervention required
+
+**Benefits**:
+- ✅ Proves dialog_tui ↔ dialog_cli interop before whitenoise integration
+- ✅ Provides regression testing for future changes
+- ✅ Can be integrated into CI/CD pipelines
+- ✅ Establishes automation patterns for Phase 1-5
+
 ### Phase 1: Dialog-Whitenoise Integration Foundation (Week 1)
 - [ ] **Extend interop test framework** to support three-way testing (TUI + CLI + Whitenoise)
 - [ ] **Create whitenoise automation helpers** similar to ht-mcp patterns

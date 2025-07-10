@@ -2,6 +2,47 @@
 
 This directory contains comprehensive integration tests and automation for achieving true interoperability between **whitenoise** and **dialog_tui** nostr-mls clients.
 
+## Quick Start: Dialog TUI-CLI Interop Test
+
+### One-liner Rust Test
+```bash
+cargo test --package integration --test tui_cli_interop -- --nocapture
+```
+
+### One-liner Bash Test
+```bash
+./integration/test_automated_interop.sh
+```
+
+## Requirements
+
+- `nak` CLI tool installed (`cargo install nak`)
+- `expect` tool installed (usually pre-installed on macOS/Linux)
+- Rust toolchain
+- No services running on ports 10547, 8080, or 7777
+
+## What the Automated Test Does
+
+1. Starts a local Nostr relay using `nak serve`
+2. Launches dialog_tui with Alice's key in automated mode using `expect`
+3. Uses dialog_cli with Bob's key to:
+   - Publish key packages
+   - Create a group and invite Alice
+   - Send a message
+4. Verifies that:
+   - Alice receives and accepts the group invite
+   - Alice receives Bob's message
+   - Alice responds with her own message
+   - Bob can fetch and see Alice's response
+5. Cleans up all processes
+
+## Test Output
+
+A successful test will show:
+```
+✅ Test PASSED: Bidirectional messaging verified!
+```
+
 ## Overview
 
 The integration test suite implements the scenarios outlined in `../whitenoise_interop_prd.md` using ht-mcp automation to control dialog_tui interactions and coordinate with whitenoise integration tests.
