@@ -745,6 +745,9 @@ impl MlsService for RealMlsService {
                 );
             filters.push(filter);
         }
+        
+        // Log subscription info for debugging
+        eprintln!("📡 Setting up real-time subscriptions for {} groups", groups.len());
 
         // Also subscribe to gift wraps for invites
         let giftwrap_filter = Filter::new()
@@ -752,14 +755,12 @@ impl MlsService for RealMlsService {
             .pubkey(self.keys.public_key());
         filters.push(giftwrap_filter);
 
-        // Create subscription
+        // Create subscription with all filters at once
         let subscription_id = SubscriptionId::new("dialog_messages");
-        for filter in filters {
-            client
-                .subscribe_with_id(subscription_id.clone(), filter, None)
-                .await
-                .map_err(|e| DialogError::General(format!("Failed to create subscription: {}", e).into()))?;
-        }
+        client
+            .subscribe_with_id(subscription_id.clone(), filters, None)
+            .await
+            .map_err(|e| DialogError::General(format!("Failed to create subscription: {}", e).into()))?;
 
         // Spawn a task to handle incoming events
         let client_clone = self.client.clone();
@@ -779,6 +780,7 @@ impl MlsService for RealMlsService {
                             match event.kind {
                                 Kind::MlsGroupMessage => {
                                     // Process MLS message
+                                    eprintln!("📨 Received MLS group message event: {}", event.id.to_hex()[0..8].to_string());
                                     let nostr_mls = nostr_mls_clone.read().await;
                                     if let Ok(_) = nostr_mls.process_message(&event) {
                                         // Extract group ID from tags
@@ -811,10 +813,12 @@ impl MlsService for RealMlsService {
                                                                 });
                                                                 
                                                                 // Send UI update
-                                                                let _ = ui_sender.send(UiUpdate::NewMessage {
+                                                                if ui_sender.send(UiUpdate::NewMessage {
                                                                     group_id: group.mls_group_id.clone(),
                                                                     message,
-                                                                }).await;
+                                                                }).await.is_ok() {
+                                                                    eprintln!("✅ Sent real-time message to UI");
+                                                                }
                                                             }
                                                         }
                                                     }
