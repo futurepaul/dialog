@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use crate::{
-    app::{App, SelectionMode},
+    app::{App, SelectionMode, MessageType},
     theme::Theme,
 };
 
@@ -68,7 +68,16 @@ fn draw_messages(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         .iter()
         .skip(start_idx)
         .take(visible_height)
-        .map(|msg| ListItem::new(msg.as_str()))
+        .map(|msg| {
+            let style = match msg.message_type {
+                MessageType::Info => Style::default().fg(Color::Gray),
+                MessageType::Success => Style::default().fg(Color::Green),
+                MessageType::Warning => Style::default().fg(Color::Yellow),
+                MessageType::Error => Style::default().fg(Color::Red),
+                MessageType::Normal => theme.text_style(),
+            };
+            ListItem::new(msg.content.as_str()).style(style)
+        })
         .collect();
 
     let messages_list = List::new(visible_messages)

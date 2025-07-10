@@ -14,6 +14,21 @@ fn format_timestamp() -> String {
 
 
 #[derive(Debug, Clone)]
+pub enum MessageType {
+    Info,
+    Success,
+    Warning,
+    Error,
+    Normal,
+}
+
+#[derive(Debug, Clone)]
+pub struct StatusMessage {
+    pub content: String,
+    pub message_type: MessageType,
+}
+
+#[derive(Debug, Clone)]
 pub struct ConversationSuggestion {
     pub conversation: Conversation,
     pub score: i64,
@@ -45,7 +60,7 @@ pub struct App {
     pub active_conversation: Option<String>,
     pub contact_count: usize,
     pub pending_invites: usize,
-    pub messages: Vec<String>,
+    pub messages: Vec<StatusMessage>,
     pub scroll_offset: usize,
     pub contacts: Vec<Contact>,
     pub conversations: Vec<Conversation>,
@@ -64,6 +79,10 @@ pub struct App {
     
     // Selection mode for interactive commands
     pub selection_mode: SelectionMode,
+    
+    // Command history
+    pub command_history: Vec<String>,
+    pub history_index: Option<usize>,
 }
 
 impl App {
@@ -111,6 +130,10 @@ impl App {
             
             // Interactive selection mode
             selection_mode: SelectionMode::None,
+            
+            // Command history
+            command_history: Vec::new(),
+            history_index: None,
         };
 
         // Add welcome messages
@@ -202,6 +225,10 @@ impl App {
                 if self.is_searching {
                     self.move_suggestion_up();
                     return AppResult::Continue;
+                } else if self.mode == AppMode::CommandInput || self.mode == AppMode::MessageInput {
+                    // Navigate command history
+                    self.navigate_history_up();
+                    return AppResult::Continue;
                 } else {
                     self.scroll_up();
                     return AppResult::Continue;
@@ -210,6 +237,10 @@ impl App {
             KeyCode::Down => {
                 if self.is_searching {
                     self.move_suggestion_down();
+                    return AppResult::Continue;
+                } else if self.mode == AppMode::CommandInput || self.mode == AppMode::MessageInput {
+                    // Navigate command history
+                    self.navigate_history_down();
                     return AppResult::Continue;
                 } else {
                     self.scroll_down();
@@ -234,6 +265,11 @@ impl App {
                 self.text_area.delete_line_by_end();
                 self.text_area.insert_char('/');
                 self.update_placeholder();
+                return AppResult::Continue;
+            }
+            KeyCode::Char('?') if self.mode == AppMode::Normal => {
+                // Quick help shortcut
+                self.process_command("/help").await;
                 return AppResult::Continue;
             }
             _ => {}
@@ -525,7 +561,7 @@ impl App {
                                 self.add_message(&format!("Accepting invite for group {}...", group_id));
                                 match self.dialog_lib.accept_invite(&group_id).await {
                                     Ok(()) => {
-                                        self.add_message("✅ Successfully joined group!");
+                                        self.add_message_with_type("✅ Successfully joined group!", MessageType::Success);
                                         self.add_message("The group should now appear in your conversations.");
                                         self.refresh_data().await;
                                         
@@ -578,7 +614,7 @@ impl App {
                         self.add_message(&format!("Creating group '{}' with {} participant(s)...", group_name, selected_contacts.len()));
                         
                         // Show which participants we're inviting (for observability)
-                        self.add_message("📋 Fetching key packages for:");
+                        self.add_message_with_type("📋 Fetching key packages for:", MessageType::Info);
                         for pubkey in &selected_contacts {
                             let name = self.contacts.iter()
                                 .find(|c| c.pubkey == *pubkey)
@@ -593,9 +629,9 @@ impl App {
                         
                         match self.dialog_lib.create_conversation(&group_name, selected_contacts).await {
                             Ok(group_id) => {
-                                self.add_message(&format!("✅ Group '{}' created successfully!", group_name));
+                                self.add_message_with_type(&format!("✅ Group '{}' created successfully!", group_name), MessageType::Success);
                                 self.add_message(&format!("Group ID: {}", group_id));
-                                self.add_message("✅ Welcome messages sent to all participants");
+                                self.add_message_with_type("✅ Welcome messages sent to all participants", MessageType::Success);
                                 self.add_message("");
                                 self.add_message("⚠️  EPHEMERAL MODE: Participants must accept invites during THIS session");
                                 self.add_message("    (Their key packages are only valid until they restart)");
@@ -630,6 +666,19 @@ impl App {
     }
 
     async fn process_input(&mut self, input: &str) {
+        // Add to command history (but don't duplicate consecutive commands)
+        if !input.trim().is_empty() {
+            if self.command_history.is_empty() || self.command_history.last() != Some(&input.to_string()) {
+                self.command_history.push(input.to_string());
+                // Limit history size to prevent unbounded growth
+                if self.command_history.len() > 100 {
+                    self.command_history.remove(0);
+                }
+            }
+        }
+        // Reset history index when a new command is entered
+        self.history_index = None;
+        
         if input.starts_with('/') {
             self.process_command(input).await;
         } else {
@@ -648,11 +697,17 @@ impl App {
                 // Could add confirmation here
                 // For now, just exit
             }
+            "/clear" => {
+                self.messages.clear();
+                self.scroll_offset = 0;
+                self.add_message_with_type("Screen cleared", MessageType::Info);
+            }
             "/help" | "/h" => {
                 self.add_message("Available commands:");
                 self.add_message("");
                 self.add_message("/help - Show this help message");
                 self.add_message("/quit - Exit the application");
+                self.add_message("/clear - Clear all messages from the screen");
                 self.add_message("/status - Show current setup and stats");
                 self.add_message("/connect - Toggle connection status");
                 self.add_message("/pk - Show your public key");
@@ -667,6 +722,7 @@ impl App {
                 self.add_message("");
                 self.add_message("Conversations:");
                 self.add_message("/switch - Switch to a conversation (interactive)");
+                self.add_message("/info - Show details about the current conversation");
                 self.add_message("/fetch - Fetch and display messages in the active conversation");
                 self.add_message("");
                 self.add_message("Features:");
@@ -675,7 +731,7 @@ impl App {
                 self.add_message("");
                 self.add_message("Navigation:");
                 self.add_message("  PageUp/PageDown - Scroll through messages");
-                self.add_message("  Up/Down arrows - Navigate @ search suggestions");
+                self.add_message("  Up/Down arrows - Navigate @ search suggestions or command history");
                 self.add_message("  Ctrl+C - Exit");
                 self.add_message("  Esc - Clear input");
                 self.add_message("");
@@ -699,7 +755,7 @@ impl App {
                     
                     match self.dialog_lib.add_contact(contact).await {
                         Ok(()) => {
-                            self.add_message(&format!("✅ Contact added: {}", contact));
+                            self.add_message_with_type(&format!("✅ Contact added: {}", contact), MessageType::Success);
                             if self.connection_status == ConnectionStatus::Connected {
                                 self.add_message("Profile loading attempted from relay");
                             }
@@ -744,7 +800,7 @@ impl App {
                     };
                     self.add_message("Select contacts for the group. Use arrow keys to navigate, Space to toggle, Enter to create, Esc to cancel.");
                     self.add_message("");
-                    self.add_message("⚠️  EPHEMERAL MODE WARNING:");
+                    self.add_message_with_type("⚠️  EPHEMERAL MODE WARNING:", MessageType::Warning);
                     self.add_message("    Make sure selected contacts are ONLINE NOW");
                     self.add_message("    They must have published key packages THIS SESSION");
                     self.add_message("    (Invites to old/offline key packages will fail)");
@@ -780,7 +836,7 @@ impl App {
                     return;
                 }
                 
-                self.add_message("Fetching pending invites...");
+                self.add_message_with_type("Fetching pending invites...", MessageType::Info);
                 match self.dialog_lib.list_pending_invites().await {
                     Ok(result) => {
                         // First show any processing errors
@@ -824,7 +880,7 @@ impl App {
                 self.add_message("Publishing key packages to relay...");
                 match self.dialog_lib.publish_key_packages().await {
                     Ok(event_ids) => {
-                        self.add_message(&format!("✅ Published {} key packages successfully!", event_ids.len()));
+                        self.add_message_with_type(&format!("✅ Published {} key packages successfully!", event_ids.len()), MessageType::Success);
                         
                         // Show event IDs for observability
                         self.add_message("📋 Key package event IDs:");
@@ -859,7 +915,7 @@ impl App {
                 // In the future, this could delete old packages first
                 match self.dialog_lib.publish_key_packages().await {
                     Ok(event_ids) => {
-                        self.add_message(&format!("✅ Published {} fresh key packages!", event_ids.len()));
+                        self.add_message_with_type(&format!("✅ Published {} fresh key packages!", event_ids.len()), MessageType::Success);
                         
                         // Show event IDs for observability
                         self.add_message("📋 Fresh key package event IDs:");
@@ -965,7 +1021,7 @@ impl App {
                             if let Err(e) = self.dialog_lib.subscribe_to_groups(ui_update_tx).await {
                                 self.add_message(&format!("⚠️  Failed to start real-time message subscription: {}", e));
                             } else {
-                                self.add_message("✅ Real-time message updates enabled");
+                                self.add_message_with_type("✅ Real-time message updates enabled", MessageType::Success);
                             }
                         }
                     }
@@ -1000,12 +1056,12 @@ impl App {
                         return;
                     }
                     
-                    self.add_message("⚠️  WARNING: This will publish your profile to the relay, making it publicly visible!");
+                    self.add_message_with_type("⚠️  WARNING: This will publish your profile to the relay, making it publicly visible!", MessageType::Warning);
                     self.add_message(&format!("Publishing profile with name: '{}'", name));
                     
                     match self.dialog_lib.publish_simple_profile(&name).await {
                         Ok(()) => {
-                            self.add_message("✅ Profile published successfully!");
+                            self.add_message_with_type("✅ Profile published successfully!", MessageType::Success);
                             self.add_message("Your name is now visible to other users when they add you as a contact.");
                         }
                         Err(e) => {
@@ -1019,7 +1075,47 @@ impl App {
                 } else {
                     self.add_message("Usage: /dangerously_publish_profile <your_name>");
                     self.add_message("Example: /dangerously_publish_profile Alice");
-                    self.add_message("⚠️  WARNING: This makes your name publicly visible on the relay!");
+                    self.add_message_with_type("⚠️  WARNING: This makes your name publicly visible on the relay!", MessageType::Warning);
+                }
+            }
+            "/info" => {
+                if let Some(ref active_id) = self.active_conversation {
+                    if let Some(conv) = self.conversations.iter().find(|c| c.id == *active_id).cloned() {
+                        self.add_message_with_type("═══ Group Information ═══", MessageType::Info);
+                        self.add_message(&format!("Name: {}", conv.name));
+                        self.add_message(&format!("Group ID: {}", &conv.id[0..16]));
+                        self.add_message(&format!("Type: {}", if conv.is_group { "Group Chat" } else { "Direct Message" }));
+                        self.add_message(&format!("Participants: {} members", conv.participants.len()));
+                        
+                        // Show participant names if we have them in contacts
+                        if !conv.participants.is_empty() {
+                            self.add_message("");
+                            self.add_message("Members:");
+                            for participant in &conv.participants {
+                                if let Some(contact) = self.contacts.iter().find(|c| &c.pubkey == participant) {
+                                    self.add_message(&format!("  • {} ({}...)", contact.name, &participant.to_hex()[0..8]));
+                                } else {
+                                    self.add_message(&format!("  • {}...", &participant.to_hex()[0..8]));
+                                }
+                            }
+                        }
+                        
+                        if let Some(ref last_msg) = conv.last_message {
+                            self.add_message("");
+                            self.add_message(&format!("Last message preview: {}", 
+                                if last_msg.len() > 50 { 
+                                    format!("{}...", &last_msg[0..50]) 
+                                } else { 
+                                    last_msg.clone() 
+                                }
+                            ));
+                        }
+                        self.add_message("═══════════════════════");
+                    } else {
+                        self.add_message_with_type("Error: Active conversation not found in list", MessageType::Error);
+                    }
+                } else {
+                    self.add_message_with_type("No active conversation. Use /switch to select one.", MessageType::Warning);
                 }
             }
             "/fetch" => {
@@ -1077,10 +1173,10 @@ impl App {
                                 }
                             }
                         } else {
-                            self.add_message("Error: Invalid conversation ID format");
+                            self.add_message_with_type("Error: Invalid conversation ID format", MessageType::Error);
                         }
                     } else {
-                        self.add_message("Error: Active conversation not found.");
+                        self.add_message_with_type("Error: Active conversation not found.", MessageType::Error);
                     }
                 } else {
                     self.add_message("No active conversation. Use /switch to select a conversation first.");
@@ -1110,10 +1206,10 @@ impl App {
                         }
                     }
                 } else {
-                    self.add_message("Error: Invalid conversation ID format");
+                    self.add_message_with_type("Error: Invalid conversation ID format", MessageType::Error);
                 }
             } else {
-                self.add_message("Error: Active conversation not found.");
+                self.add_message_with_type("Error: Active conversation not found.", MessageType::Error);
             }
         } else {
             self.add_message("No active conversation. Use /switch to see available conversations or /create to start one.");
@@ -1121,11 +1217,18 @@ impl App {
     }
 
     pub fn add_message(&mut self, message: &str) {
+        self.add_message_with_type(message, MessageType::Normal);
+    }
+    
+    pub fn add_message_with_type(&mut self, message: &str, message_type: MessageType) {
         // Wrap long messages to fit in terminal (leaving some margin for UI elements)
         let max_width = 120; // Conservative width that should work on most terminals
         
         if message.len() <= max_width {
-            self.messages.push(message.to_string());
+            self.messages.push(StatusMessage {
+                content: message.to_string(),
+                message_type,
+            });
         } else {
             // Split long messages into multiple lines
             let words: Vec<&str> = message.split_whitespace().collect();
@@ -1151,9 +1254,15 @@ impl App {
             // Add continuation marker for wrapped lines
             for (i, line) in lines.into_iter().enumerate() {
                 if i == 0 {
-                    self.messages.push(line);
+                    self.messages.push(StatusMessage {
+                        content: line,
+                        message_type: message_type.clone(),
+                    });
                 } else {
-                    self.messages.push(format!("  {}", line)); // Indent continuation lines
+                    self.messages.push(StatusMessage {
+                        content: format!("  {}", line), // Indent continuation lines
+                        message_type: message_type.clone(),
+                    });
                 }
             }
         }
@@ -1174,6 +1283,53 @@ impl App {
     pub fn scroll_down(&mut self) {
         if self.scroll_offset < self.messages.len().saturating_sub(1) {
             self.scroll_offset += 1;
+        }
+    }
+    
+    pub fn navigate_history_up(&mut self) {
+        if self.command_history.is_empty() {
+            return;
+        }
+        
+        match self.history_index {
+            None => {
+                // Start from the most recent command
+                self.history_index = Some(self.command_history.len() - 1);
+                self.text_area.delete_line_by_head();
+                self.text_area.delete_line_by_end();
+                self.text_area.insert_str(&self.command_history[self.command_history.len() - 1]);
+            }
+            Some(idx) if idx > 0 => {
+                // Go to older command
+                self.history_index = Some(idx - 1);
+                self.text_area.delete_line_by_head();
+                self.text_area.delete_line_by_end();
+                self.text_area.insert_str(&self.command_history[idx - 1]);
+            }
+            _ => {
+                // Already at oldest command, do nothing
+            }
+        }
+    }
+    
+    pub fn navigate_history_down(&mut self) {
+        match self.history_index {
+            Some(idx) if idx < self.command_history.len() - 1 => {
+                // Go to newer command
+                self.history_index = Some(idx + 1);
+                self.text_area.delete_line_by_head();
+                self.text_area.delete_line_by_end();
+                self.text_area.insert_str(&self.command_history[idx + 1]);
+            }
+            Some(idx) if idx == self.command_history.len() - 1 => {
+                // At the newest command, clear to show current input
+                self.history_index = None;
+                self.text_area.delete_line_by_head();
+                self.text_area.delete_line_by_end();
+            }
+            _ => {
+                // No history navigation active, do nothing
+            }
         }
     }
 
@@ -1256,10 +1412,19 @@ impl App {
     }
 
     pub fn get_status_text(&self) -> String {
-        let input_context = match self.mode {
-            AppMode::Normal => "Type '/' to start a command",
-            AppMode::CommandInput => "Enter command",
-            AppMode::MessageInput => "Type message and press Enter to send",
+        let input_context = match (&self.mode, &self.selection_mode) {
+            (_, SelectionMode::InviteSelection { .. }) => "↑↓ Navigate • Enter: Accept • Esc: Cancel",
+            (_, SelectionMode::ConversationSelection { .. }) => "↑↓ Navigate • Enter: Switch • Esc: Cancel",
+            (_, SelectionMode::ContactSelection { .. }) => "↑↓ Navigate • Space: Toggle • Enter: Create • Esc: Cancel",
+            (AppMode::Normal, _) => "Press / for commands, ? for help",
+            (AppMode::CommandInput, _) => "Command mode • ↑↓ History • Enter: Execute • Esc: Cancel",
+            (AppMode::MessageInput, _) => {
+                if self.is_searching {
+                    "@ search • ↑↓ Navigate • Enter: Select • Esc: Cancel"
+                } else {
+                    "Message mode • Enter: Send • Esc: Cancel"
+                }
+            },
         };
 
         let conversation_info = match &self.active_conversation {
