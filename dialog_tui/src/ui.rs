@@ -282,6 +282,9 @@ fn draw_selection_mode(f: &mut Frame, app: &App, theme: &Theme) {
         SelectionMode::ContactSelection { group_name, selections, state } => {
             draw_contact_selection(f, group_name, &app.contacts, selections, state, theme);
         }
+        SelectionMode::InviteConfirmation { invite, accept } => {
+            draw_invite_confirmation(f, invite, *accept, theme);
+        }
     }
 }
 
@@ -434,4 +437,105 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
+}
+
+fn draw_invite_confirmation(f: &mut Frame, invite: &dialog_lib::PendingInvite, accept: bool, theme: &Theme) {
+    let area = centered_rect(60, 40, f.area());
+    
+    // Clear the area
+    f.render_widget(Clear, area);
+    
+    // Create the confirmation dialog
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Confirm Invite Action")
+        .border_style(theme.border_focused_style());
+    
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    
+    // Split inner area for content
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(1)
+        .constraints([
+            Constraint::Length(4),    // Invite info
+            Constraint::Length(2),    // Question
+            Constraint::Min(1),       // Spacer
+            Constraint::Length(3),    // Buttons
+            Constraint::Length(2),    // Help text
+        ])
+        .split(inner);
+    
+    // Invite information
+    let info_text = vec![
+        Line::from(vec![
+            Span::raw("Group: "),
+            Span::styled(&invite.group_name, Style::default().fg(Color::Yellow)),
+        ]),
+        Line::from(vec![
+            Span::raw("Members: "),
+            Span::styled(invite.member_count.to_string(), Style::default().fg(Color::Cyan)),
+        ]),
+        Line::from(""),
+    ];
+    let info = Paragraph::new(info_text)
+        .alignment(Alignment::Center);
+    f.render_widget(info, chunks[0]);
+    
+    // Question
+    let question = Paragraph::new("Do you want to join this group?")
+        .style(theme.text_style())
+        .alignment(Alignment::Center);
+    f.render_widget(question, chunks[1]);
+    
+    // Buttons
+    let button_area = chunks[3];
+    let button_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(30),
+            Constraint::Percentage(20),
+            Constraint::Percentage(20),
+            Constraint::Percentage(30),
+        ])
+        .split(button_area);
+    
+    // Accept button
+    let accept_style = if accept {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Green)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::DIM)
+    };
+    let accept_button = Paragraph::new(" Accept ")
+        .style(accept_style)
+        .alignment(Alignment::Center);
+    f.render_widget(accept_button, button_chunks[1]);
+    
+    // Reject button
+    let reject_style = if !accept {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Red)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(Color::Red)
+            .add_modifier(Modifier::DIM)
+    };
+    let reject_button = Paragraph::new(" Reject ")
+        .style(reject_style)
+        .alignment(Alignment::Center);
+    f.render_widget(reject_button, button_chunks[2]);
+    
+    // Help text
+    let help = Paragraph::new("←→/Tab: Switch | Enter: Confirm | Esc: Cancel")
+        .style(theme.help_style())
+        .alignment(Alignment::Center);
+    f.render_widget(help, chunks[4]);
 }

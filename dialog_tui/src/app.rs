@@ -50,6 +50,10 @@ pub enum SelectionMode {
         selections: Vec<bool>,
         state: ListState,
     },
+    InviteConfirmation {
+        invite: PendingInvite,
+        accept: bool, // true if cursor is on "Accept", false if on "Reject"
+    },
 }
 
 #[derive(Debug)]
@@ -524,6 +528,9 @@ impl App {
                             state.select(Some(i));
                         }
                     }
+                    SelectionMode::InviteConfirmation { accept, .. } => {
+                        *accept = !*accept; // Toggle between Accept and Reject
+                    }
                     _ => {}
                 }
                 return AppResult::Continue;
@@ -575,6 +582,9 @@ impl App {
                             state.select(Some(i));
                         }
                     }
+                    SelectionMode::InviteConfirmation { accept, .. } => {
+                        *accept = !*accept; // Toggle between Accept and Reject
+                    }
                     _ => {}
                 }
                 return AppResult::Continue;
@@ -595,30 +605,11 @@ impl App {
                     SelectionMode::InviteSelection { state, invites } => {
                         if let Some(i) = state.selected() {
                             if i < invites.len() {
-                                let invite = &invites[i];
-                                let group_id = hex::encode(invite.group_id.as_slice());
-                                self.selection_mode = SelectionMode::None;
-                                
-                                // Process the accept command
-                                self.add_message(&format!("Accepting invite for group {}...", group_id));
-                                match self.dialog_lib.accept_invite(&group_id).await {
-                                    Ok(()) => {
-                                        self.add_message_with_type("✅ Successfully joined group!", MessageType::Success);
-                                        self.add_message("The group should now appear in your conversations.");
-                                        self.refresh_data().await;
-                                        
-                                        // Auto-switch to the newly joined group
-                                        if let Ok(()) = self.dialog_lib.switch_conversation(&group_id).await {
-                                            self.active_conversation = Some(group_id.clone());
-                                            if let Some(conv) = self.conversations.iter().find(|c| c.id == group_id) {
-                                                self.add_message(&format!("📍 Auto-switched to group: {}", conv.name));
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        self.add_message(&format!("❌ Error accepting invite: {}", e));
-                                    }
-                                }
+                                let invite = invites[i].clone();
+                                self.selection_mode = SelectionMode::InviteConfirmation {
+                                    invite,
+                                    accept: true, // Default to Accept
+                                };
                             }
                         }
                     }
@@ -695,6 +686,39 @@ impl App {
                                     self.add_message("    - They need to run /keypackage to publish fresh ones");
                                 }
                             }
+                        }
+                    }
+                    SelectionMode::InviteConfirmation { invite, accept } => {
+                        let invite = invite.clone();
+                        let accept = *accept;
+                        self.selection_mode = SelectionMode::None;
+                        
+                        if accept {
+                            // Accept the invite
+                            let group_id = hex::encode(invite.group_id.as_slice());
+                            self.add_message(&format!("Accepting invite for group {}...", invite.group_name));
+                            match self.dialog_lib.accept_invite(&group_id).await {
+                                Ok(()) => {
+                                    self.add_message_with_type("✅ Successfully joined group!", MessageType::Success);
+                                    self.add_message("The group should now appear in your conversations.");
+                                    self.refresh_data().await;
+                                    
+                                    // Auto-switch to the newly joined group
+                                    if let Ok(()) = self.dialog_lib.switch_conversation(&group_id).await {
+                                        self.active_conversation = Some(group_id.clone());
+                                        if let Some(conv) = self.conversations.iter().find(|c| c.id == group_id) {
+                                            self.add_message(&format!("📍 Auto-switched to group: {}", conv.name));
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    self.add_message(&format!("❌ Error accepting invite: {}", e));
+                                }
+                            }
+                        } else {
+                            // Reject the invite
+                            self.add_message_with_type(&format!("❌ Rejected invite for group: {}", invite.group_name), MessageType::Info);
+                            // TODO: Implement actual rejection logic when available in dialog_lib
                         }
                     }
                     _ => {}
@@ -1078,11 +1102,10 @@ impl App {
                 if self.conversations.is_empty() {
                     self.add_message("No conversations available. Create or join a group first.");
                 } else {
-                    // Enter selection mode
-                    let mut state = ListState::default();
-                    state.select(Some(0));
-                    self.selection_mode = SelectionMode::ConversationSelection { state };
-                    self.add_message("Select a conversation. Use arrow keys to navigate, Enter to switch, Esc to cancel.");
+                    // Open sidebar instead of modal
+                    self.show_sidebar = true;
+                    self.sidebar_selection = 0; // Start at first conversation
+                    self.add_message_with_type("Sidebar opened - use ↑↓ to navigate, Enter to switch to a conversation.", MessageType::Info);
                 }
             }
             "/dangerously_publish_profile" => {
@@ -1166,60 +1189,9 @@ impl App {
                     return;
                 }
                 
-                if let Some(ref active_id) = self.active_conversation {
-                    if let Some(conv) = self.conversations.iter().find(|c| c.id == *active_id).cloned() {
-                        self.add_message("Fetching messages...");
-                        
-                        if let Ok(bytes) = hex::decode(&conv.id) {
-                            let group_id = GroupId::from_slice(&bytes);
-                            match self.dialog_lib.fetch_messages(&group_id).await {
-                                Ok(result) => {
-                                    // First show any processing errors
-                                    if !result.processing_errors.is_empty() {
-                                        self.add_message("Processing errors encountered:");
-                                        for error in &result.processing_errors {
-                                            self.add_message(&format!("  {}", error));
-                                        }
-                                        self.add_message("");
-                                    }
-                                    
-                                    // Then show the messages
-                                    if result.messages.is_empty() {
-                                        self.add_message("No messages in this conversation yet.");
-                                    } else {
-                                        self.add_message(&format!("Fetched {} messages:", result.messages.len()));
-                                        self.add_message("");
-                                        
-                                        for msg in result.messages {
-                                            // Get sender name from contacts or use truncated pubkey
-                                            let own_pubkey = self.dialog_lib.get_own_pubkey().await.ok();
-                                            let sender_name = if own_pubkey.as_ref() == Some(&msg.sender) {
-                                                "You".to_string()
-                                            } else if let Some(contact) = self.contacts.iter().find(|c| c.pubkey == msg.sender) {
-                                                contact.name.clone()
-                                            } else {
-                                                format!("{}...", &msg.sender.to_hex()[0..8])
-                                            };
-                                            
-                                            self.add_message(&format!("{} {}: {}", format_timestamp(), sender_name, msg.content));
-                                        }
-                                        
-                                        self.add_message("");
-                                        self.add_message("--- End of messages ---");
-                                    }
-                                }
-                                Err(e) => {
-                                    self.add_message(&format!("❌ Error fetching messages: {}", e));
-                                }
-                            }
-                        } else {
-                            self.add_message_with_type("Error: Invalid conversation ID format", MessageType::Error);
-                        }
-                    } else {
-                        self.add_message_with_type("Error: Active conversation not found.", MessageType::Error);
-                    }
-                } else {
-                    self.add_message("No active conversation. Use /switch to select a conversation first.");
+                self.add_message("Fetching messages...");
+                if let Err(e) = self.fetch_active_conversation_messages().await {
+                    self.add_message_with_type(&format!("❌ {}", e), MessageType::Error);
                 }
             }
             _ => {
@@ -1373,6 +1345,63 @@ impl App {
         }
     }
     
+    async fn fetch_active_conversation_messages(&mut self) -> Result<(), String> {
+        if let Some(ref active_id) = self.active_conversation {
+            if let Some(conv) = self.conversations.iter().find(|c| c.id == *active_id).cloned() {
+                if let Ok(bytes) = hex::decode(&conv.id) {
+                    let group_id = GroupId::from_slice(&bytes);
+                    match self.dialog_lib.fetch_messages(&group_id).await {
+                        Ok(result) => {
+                            // First show any processing errors
+                            if !result.processing_errors.is_empty() {
+                                self.add_message("Processing errors encountered:");
+                                for error in &result.processing_errors {
+                                    self.add_message(&format!("  {}", error));
+                                }
+                                self.add_message("");
+                            }
+                            
+                            // Then show the messages
+                            if result.messages.is_empty() {
+                                self.add_message("No messages in this conversation yet.");
+                            } else {
+                                self.add_message(&format!("Fetched {} messages:", result.messages.len()));
+                                self.add_message("");
+                                
+                                for msg in result.messages {
+                                    // Get sender name from contacts or use truncated pubkey
+                                    let own_pubkey = self.dialog_lib.get_own_pubkey().await.ok();
+                                    let sender_name = if own_pubkey.as_ref() == Some(&msg.sender) {
+                                        "You".to_string()
+                                    } else if let Some(contact) = self.contacts.iter().find(|c| c.pubkey == msg.sender) {
+                                        contact.name.clone()
+                                    } else {
+                                        format!("{}...", &msg.sender.to_hex()[0..8])
+                                    };
+                                    
+                                    self.add_message(&format!("{} {}: {}", format_timestamp(), sender_name, msg.content));
+                                }
+                                
+                                self.add_message("");
+                                self.add_message("--- End of messages ---");
+                            }
+                            Ok(())
+                        }
+                        Err(e) => {
+                            Err(format!("Error fetching messages: {}", e))
+                        }
+                    }
+                } else {
+                    Err("Invalid conversation ID format".to_string())
+                }
+            } else {
+                Err("Active conversation not found.".to_string())
+            }
+        } else {
+            Err("No active conversation".to_string())
+        }
+    }
+    
     pub fn sidebar_up(&mut self) {
         let total_items = self.conversations.len() + self.contacts.len() + self.pending_invites_list.len();
         if total_items > 0 && self.sidebar_selection > 0 {
@@ -1406,21 +1435,14 @@ impl App {
                 self.add_message_with_type(&format!("Direct messages with {} not yet implemented", contact.name), MessageType::Warning);
             }
         } else {
-            // Selected an invite
+            // Selected an invite - show confirmation modal
             let invite_idx = self.sidebar_selection - conv_count - contact_count;
             if let Some(invite) = self.pending_invites_list.get(invite_idx).cloned() {
                 self.show_sidebar = false;
-                self.add_message(&format!("Accepting invite for group {}...", invite.group_name));
-                match self.dialog_lib.accept_invite(&hex::encode(invite.group_id.as_slice())).await {
-                    Ok(()) => {
-                        self.add_message_with_type("✅ Successfully joined group!", MessageType::Success);
-                        self.add_message("The group should now appear in your conversations.");
-                        self.refresh_data().await;
-                    }
-                    Err(e) => {
-                        self.add_message_with_type(&format!("Error accepting invite: {}", e), MessageType::Error);
-                    }
-                }
+                self.selection_mode = SelectionMode::InviteConfirmation {
+                    invite,
+                    accept: true, // Default to Accept
+                };
             }
         }
     }
@@ -1475,6 +1497,21 @@ impl App {
                 }
                 UiUpdate::GroupStateChange { .. } => {
                     // Could refresh conversations here if needed
+                }
+                UiUpdate::GroupHasNewMessages { group_id } => {
+                    // Check if this is for the active conversation
+                    if let Some(ref active_id) = self.active_conversation {
+                        if let Some(conv) = self.conversations.iter().find(|c| c.id == *active_id) {
+                            if let Some(ref conv_group_id) = conv.group_id {
+                                if conv_group_id == &group_id {
+                                    // Fetch messages for the active conversation
+                                    if let Err(e) = self.fetch_active_conversation_messages().await {
+                                        self.add_message_with_type(&format!("❌ Error fetching messages: {}", e), MessageType::Error);
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

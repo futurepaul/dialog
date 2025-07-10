@@ -167,4 +167,6 @@ pub enum UiUpdate {
     ConnectionStatus(ConnectionStatus),
     /// New invitation received
     NewInvite(PendingInvite),
+    /// Group has new messages (triggers a fetch)
+    GroupHasNewMessages { group_id: GroupId },
 }

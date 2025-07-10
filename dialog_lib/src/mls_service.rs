@@ -11,11 +11,6 @@ use std::sync::Arc;
 use tokio::sync::{RwLock, mpsc};
 
 /// Message cache entry with timestamp for ordering
-#[derive(Debug, Clone)]
-struct CachedMessage {
-    message: Message,
-    event_id: EventId,
-}
 
 /// Real MLS service implementation using actual Nostr-MLS operations
 #[derive(Debug)]
@@ -34,10 +29,10 @@ pub struct RealMlsService {
     contacts: Arc<RwLock<HashMap<PublicKey, Contact>>>,
     /// Runtime cache for profiles (pubkey -> Profile)
     profiles: Arc<RwLock<HashMap<PublicKey, Profile>>>,
-    /// Message cache (group_id -> messages)
-    message_cache: Arc<RwLock<HashMap<GroupId, Vec<CachedMessage>>>>,
     /// Last sync timestamp for each group
     last_sync: Arc<RwLock<HashMap<GroupId, i64>>>,
+    /// Track displayed message event IDs per group to prevent duplicates
+    displayed_messages: Arc<RwLock<HashMap<GroupId, std::collections::HashSet<String>>>>,
     /// UI sender for real-time updates
     ui_sender: Arc<RwLock<Option<mpsc::Sender<UiUpdate>>>>,
     /// Current subscription ID for group messages
@@ -79,8 +74,8 @@ impl RealMlsService {
             connection_status: Arc::new(RwLock::new(ConnectionStatus::Disconnected)),
             contacts: Arc::new(RwLock::new(HashMap::new())),
             profiles: Arc::new(RwLock::new(HashMap::new())),
-            message_cache: Arc::new(RwLock::new(HashMap::new())),
             last_sync: Arc::new(RwLock::new(HashMap::new())),
+            displayed_messages: Arc::new(RwLock::new(HashMap::new())),
             ui_sender: Arc::new(RwLock::new(None)),
             subscription_id: Arc::new(RwLock::new(None)),
         })
@@ -260,6 +255,15 @@ impl MlsService for RealMlsService {
         
         // Process locally for state sync (required in MLS)
         let _ = nostr_mls.process_message(&message_event).await?;
+
+        // Mark this message's event ID as displayed to prevent showing it again
+        // when we receive it back from the relay
+        {
+            let mut displayed_msgs = self.displayed_messages.write().await;
+            let group_displayed = displayed_msgs.entry(group_id.clone())
+                .or_insert_with(std::collections::HashSet::new);
+            group_displayed.insert(message_event.id.to_hex());
+        }
 
         // Send to relay
         client
@@ -934,7 +938,7 @@ impl MlsService for RealMlsService {
         let client_clone = self.client.clone();
         let nostr_mls_clone = self.nostr_mls.clone();
         let keys_clone = self.keys.clone();
-        let message_cache_clone = self.message_cache.clone();
+        let displayed_messages_clone = self.displayed_messages.clone();
         
         tokio::spawn(async move {
             loop {
@@ -947,45 +951,36 @@ impl MlsService for RealMlsService {
                             // Process the event based on its kind
                             match event.kind {
                                 Kind::MlsGroupMessage => {
-                                    // Process MLS message
-                                    let nostr_mls = nostr_mls_clone.read().await;
-                                    if let Ok(_) = nostr_mls.process_message(&event).await {
-                                        // Extract group ID from tags
-                                        if let Some(tag) = event.tags.iter().find(|t| {
-                                            t.as_slice().len() >= 2 && t.as_slice()[0] == "h"
-                                        }) {
-                                            if let Ok(nostr_group_id_bytes) = hex::decode(&tag.as_slice()[1]) {
-                                                // Find the matching group
-                                                if let Ok(groups) = nostr_mls.get_groups().await {
-                                                    if let Some(group) = groups.iter().find(|g| {
-                                                        g.nostr_group_id.as_slice() == nostr_group_id_bytes.as_slice()
-                                                    }) {
-                                                        // Get the decrypted message
-                                                        if let Ok(messages) = nostr_mls.get_messages(&group.mls_group_id).await {
-                                                            // Find the latest message
-                                                            if let Some(msg) = messages.last() {
-                                                                let message = Message {
-                                                                    sender: msg.pubkey,
-                                                                    content: msg.content.clone(),
-                                                                    timestamp: event.created_at.as_u64() as i64,
-                                                                    id: Some(event.id.to_hex()),
-                                                                };
-                                                                
-                                                                // Cache the message
-                                                                let mut cache = message_cache_clone.write().await;
-                                                                let cached_messages = cache.entry(group.mls_group_id.clone()).or_insert_with(Vec::new);
-                                                                cached_messages.push(CachedMessage {
-                                                                    message: message.clone(),
-                                                                    event_id: event.id,
-                                                                });
-                                                                
-                                                                // Send UI update
-                                                                let _ = ui_sender.send(UiUpdate::NewMessage {
-                                                                    group_id: group.mls_group_id.clone(),
-                                                                    message,
-                                                                }).await;
-                                                            }
+                                    // Check if this is our own message we already processed
+                                    let displayed_msgs = displayed_messages_clone.read().await;
+                                    let event_id_hex = event.id.to_hex();
+                                    
+                                    // Extract group ID from tags first to check
+                                    if let Some(tag) = event.tags.iter().find(|t| {
+                                        t.as_slice().len() >= 2 && t.as_slice()[0] == "h"
+                                    }) {
+                                        if let Ok(nostr_group_id_bytes) = hex::decode(&tag.as_slice()[1]) {
+                                            // Find the matching group
+                                            let nostr_mls = nostr_mls_clone.read().await;
+                                            if let Ok(groups) = nostr_mls.get_groups().await {
+                                                if let Some(group) = groups.iter().find(|g| {
+                                                    g.nostr_group_id.as_slice() == nostr_group_id_bytes.as_slice()
+                                                }) {
+                                                    // Check if we've already processed this message
+                                                    if let Some(group_displayed) = displayed_msgs.get(&group.mls_group_id) {
+                                                        if group_displayed.contains(&event_id_hex) {
+                                                            // Skip processing - we already handled this when sending
+                                                            continue;
                                                         }
+                                                    }
+                                                    
+                                                    // Process the event to decrypt it
+                                                    if let Ok(_) = nostr_mls.process_message(&event).await {
+                                                        // Just notify that this group has new messages
+                                                        // The UI will re-fetch to get the correct, deduplicated list
+                                                        let _ = ui_sender.send(UiUpdate::GroupHasNewMessages {
+                                                            group_id: group.mls_group_id.clone(),
+                                                        }).await;
                                                     }
                                                 }
                                             }
@@ -1087,23 +1082,8 @@ impl MlsService for RealMlsService {
             .await
             .map_err(|e| DialogError::General(format!("Failed to fetch messages: {}", e).into()))?;
 
-        // Check if we have cached messages for this group
-        let mut message_cache = self.message_cache.write().await;
-        let cached_messages = message_cache.entry(group_id.clone()).or_insert_with(Vec::new);
-        
-        // Track which events we've already processed
-        let processed_event_ids: std::collections::HashSet<_> = cached_messages
-            .iter()
-            .map(|cm| cm.event_id)
-            .collect();
-
-        // Process each event to extract messages
+        // Process each event to decrypt and store messages
         for event in events {
-            // Skip if we've already processed this event
-            if processed_event_ids.contains(&event.id) {
-                continue;
-            }
-
             // Process the message to decrypt it
             if let Err(e) = nostr_mls.process_message(&event).await {
                 // Collect error for UI display
@@ -1114,50 +1094,42 @@ impl MlsService for RealMlsService {
                 ));
                 continue;
             }
+        }
 
-            // Get the timestamp from the event
-            let timestamp = event.created_at.as_u64() as i64;
+        // Get all decrypted messages from storage
+        let stored_messages = nostr_mls.get_messages(&stored_group.mls_group_id).await?;
+        
+        // Update displayed messages tracking
+        {
+            let mut displayed_msgs = self.displayed_messages.write().await;
+            let group_displayed = displayed_msgs.entry(group_id.clone())
+                .or_insert_with(std::collections::HashSet::new);
             
-            // Try to get the decrypted message from storage
-            let stored_messages = nostr_mls.get_messages(&stored_group.mls_group_id).await?;
-            
-            // Find the message that corresponds to this event (by matching content/timestamp)
-            // This is a bit hacky but necessary since nostr-mls doesn't expose event IDs
-            if let Some(msg) = stored_messages.iter().find(|m| {
-                // Find a message that we haven't cached yet
-                !cached_messages.iter().any(|cm| 
-                    cm.message.sender == m.pubkey && 
-                    cm.message.content == m.content
-                )
-            }) {
-                let message = Message {
-                    sender: msg.pubkey,
-                    content: msg.content.clone(),
-                    timestamp,
-                    id: Some(event.id.to_hex()),
-                };
-                
-                cached_messages.push(CachedMessage {
-                    message: message.clone(),
-                    event_id: event.id,
-                });
+            // Mark all fetched messages as displayed
+            for msg in stored_messages.iter() {
+                group_displayed.insert(msg.id.to_hex());
             }
         }
+        
+        // Convert storage messages to our Message format
+        let mut messages: Vec<Message> = stored_messages
+            .iter()
+            .map(|msg| Message {
+                sender: msg.pubkey,
+                content: msg.content.clone(),
+                timestamp: msg.created_at.as_u64() as i64,
+                id: Some(msg.id.to_hex()), // Include the event ID!
+            })
+            .collect();
+
+        // Sort messages by timestamp (oldest first)
+        messages.sort_by_key(|m| m.timestamp);
 
         // Update last sync time
         {
             let mut last_sync = self.last_sync.write().await;
             last_sync.insert(group_id.clone(), chrono::Utc::now().timestamp());
         }
-
-        // Return all cached messages for this group
-        let mut messages: Vec<Message> = cached_messages
-            .iter()
-            .map(|cm| cm.message.clone())
-            .collect();
-
-        // Sort messages by timestamp (oldest first)
-        messages.sort_by_key(|m| m.timestamp);
 
         Ok(MessageFetchResult {
             messages,

@@ -12,6 +12,7 @@ use ratatui::{
 };
 use std::{env, io, path::PathBuf};
 use tracing::info;
+use dialog_lib::StorageBackend;
 
 mod app;
 mod ui;
@@ -39,6 +40,19 @@ fn find_and_load_env() {
             Some(parent) => current_dir = parent.to_path_buf(),
             None => break, // Reached filesystem root
         }
+    }
+}
+
+fn get_data_dir() -> Result<PathBuf> {
+    // Try to get platform-specific data directory
+    if let Some(data_dir) = dirs::data_dir() {
+        Ok(data_dir.join("dialog"))
+    } else if let Ok(home) = env::var("HOME") {
+        // Fallback to home directory
+        Ok(PathBuf::from(home).join(".dialog"))
+    } else {
+        // Last resort - current directory
+        Ok(PathBuf::from(".dialog"))
     }
 }
 
@@ -83,12 +97,20 @@ async fn main() -> Result<()> {
                 .help("Secret key for identity: 'bob', 'alice', or hex string")
                 .required(true),
         )
+        .arg(
+            Arg::new("ephemeral")
+                .long("ephemeral")
+                .help("Use ephemeral (in-memory) storage instead of persistent SQLite")
+                .action(clap::ArgAction::SetTrue),
+        )
         .get_matches();
 
     let key_arg = matches.get_one::<String>("key").unwrap();
     let sk_hex = get_secret_key(key_arg)?;
     let keys = Keys::parse(&sk_hex)
         .map_err(|e| anyhow::anyhow!("Failed to parse secret key: {}", e))?;
+    
+    let use_ephemeral = matches.get_flag("ephemeral");
 
     info!("Starting Dialog TUI with MLS operations for key: {}", key_arg);
 
@@ -101,9 +123,29 @@ async fn main() -> Result<()> {
     let mut terminal = Terminal::new(backend)
         .map_err(|e| anyhow::anyhow!("Failed to create terminal: {}", e))?;
 
-    // Create app with MLS service using provided keys
-    let dialog_lib = dialog_lib::DialogLib::new_with_keys(keys).await
-        .map_err(|e| anyhow::anyhow!("Failed to initialize MLS service: {}", e))?;
+    // Create app with MLS service using provided keys and storage backend
+    let dialog_lib = if use_ephemeral {
+        info!("Using ephemeral (memory) storage");
+        dialog_lib::DialogLib::new_with_keys(keys).await
+            .map_err(|e| anyhow::anyhow!("Failed to initialize MLS service: {}", e))?
+    } else {
+        let data_dir = get_data_dir()?;
+        let db_path = data_dir.join(format!("{}.db", key_arg));
+        info!("Using SQLite storage at: {:?}", db_path);
+        
+        // Get relay URL from config
+        let config = dialog_lib::DialogConfig::new();
+        let relay_url = config.relay_urls.first()
+            .ok_or_else(|| anyhow::anyhow!("No relay URLs configured"))?
+            .clone();
+        
+        dialog_lib::DialogLib::new_with_storage(
+            keys,
+            relay_url,
+            StorageBackend::Sqlite { path: db_path }
+        ).await
+        .map_err(|e| anyhow::anyhow!("Failed to initialize MLS service with SQLite: {}", e))?
+    };
     
     let mut app = App::new_with_service(dialog_lib).await
         .map_err(|e| anyhow::anyhow!("Failed to create app: {}", e))?;
@@ -131,28 +173,16 @@ async fn main() -> Result<()> {
                 // Refresh data to get latest state
                 app.refresh_data().await;
                 
-                // EPHEMERAL MODE: Always publish fresh key packages on startup
-                // 
-                // IMPORTANT: Dialog currently uses memory storage (NostrMlsMemoryStorage), which means:
-                // - MLS HPKE private keys are lost on restart (these are NOT derived from nsec!)
-                // - Old key packages on the relay become "orphaned" - we can't decrypt welcomes sent to them
-                // - We MUST publish fresh packages on every startup to receive invites
-                //
-                // TRADEOFFS:
-                // - ✅ Users can always receive invites sent during THIS session
-                // - ❌ Invites sent while offline or to old sessions will fail
-                // - ❌ No forward secrecy across restarts
-                // - ⚠️  Users must coordinate to be online at the same time
-                //
-                // When we implement persistent storage, we can:
-                // - Keep HPKE private keys across restarts
-                // - Support "offline invites" 
-                // - Maintain forward secrecy properly
+                // Publish key packages on startup
                 app.add_message("");
-                app.add_message("🔐 Publishing fresh key packages (ephemeral mode)...");
+                if use_ephemeral {
+                    app.add_message("🔐 Publishing fresh key packages (ephemeral mode)...");
+                } else {
+                    app.add_message("🔐 Publishing key packages...");
+                }
                 match app.dialog_lib.publish_key_packages().await {
                     Ok(event_ids) => {
-                        app.add_message(&format!("✅ Published {} key packages for this session", event_ids.len()));
+                        app.add_message(&format!("✅ Published {} key packages", event_ids.len()));
                         
                         // Show event IDs for observability
                         app.add_message("📋 Key package event IDs:");
@@ -165,8 +195,13 @@ async fn main() -> Result<()> {
                         }
                         
                         app.add_message("");
-                        app.add_message("⚠️  EPHEMERAL MODE: You can only accept invites sent during THIS session");
-                        app.add_message("    (Memory storage means HPKE keys are lost on restart)");
+                        if use_ephemeral {
+                            app.add_message("⚠️  EPHEMERAL MODE: You can only accept invites sent during THIS session");
+                            app.add_message("    (Memory storage means HPKE keys are lost on restart)");
+                        } else {
+                            app.add_message("✅ PERSISTENT MODE: Your keys are saved and will work across restarts");
+                            app.add_message("    (SQLite storage preserves HPKE keys and forward secrecy)");
+                        }
                     }
                     Err(e) => {
                         app.add_message(&format!("❌ Failed to publish key packages: {}", e));
