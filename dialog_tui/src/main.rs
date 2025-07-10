@@ -131,9 +131,49 @@ async fn main() -> Result<()> {
                 // Refresh data to get latest state
                 app.refresh_data().await;
                 
-                // Check if key package is published
+                // EPHEMERAL MODE: Always publish fresh key packages on startup
+                // 
+                // IMPORTANT: Dialog currently uses memory storage (NostrMlsMemoryStorage), which means:
+                // - MLS HPKE private keys are lost on restart (these are NOT derived from nsec!)
+                // - Old key packages on the relay become "orphaned" - we can't decrypt welcomes sent to them
+                // - We MUST publish fresh packages on every startup to receive invites
+                //
+                // TRADEOFFS:
+                // - ✅ Users can always receive invites sent during THIS session
+                // - ❌ Invites sent while offline or to old sessions will fail
+                // - ❌ No forward secrecy across restarts
+                // - ⚠️  Users must coordinate to be online at the same time
+                //
+                // When we implement persistent storage, we can:
+                // - Keep HPKE private keys across restarts
+                // - Support "offline invites" 
+                // - Maintain forward secrecy properly
                 app.add_message("");
-                app.add_message("💡 Use /keypackage to publish your key package if you haven't already");
+                app.add_message("🔐 Publishing fresh key packages (ephemeral mode)...");
+                match app.dialog_lib.publish_key_packages().await {
+                    Ok(event_ids) => {
+                        app.add_message(&format!("✅ Published {} key packages for this session", event_ids.len()));
+                        
+                        // Show event IDs for observability
+                        app.add_message("📋 Key package event IDs:");
+                        for (i, event_id) in event_ids.iter().enumerate() {
+                            app.add_message(&format!("    {}: {}...{}", 
+                                i + 1, 
+                                &event_id[0..8], 
+                                &event_id[event_id.len()-8..]
+                            ));
+                        }
+                        
+                        app.add_message("");
+                        app.add_message("⚠️  EPHEMERAL MODE: You can only accept invites sent during THIS session");
+                        app.add_message("    (Memory storage means HPKE keys are lost on restart)");
+                    }
+                    Err(e) => {
+                        app.add_message(&format!("❌ Failed to publish key packages: {}", e));
+                        app.add_message("⚠️  You won't be able to receive group invites!");
+                        app.add_message("    Try /keypackage to publish manually");
+                    }
+                }
             } else {
                 app.add_message("❌ Failed to connect to relay");
                 app.add_message("You can try /connect later to establish a connection");

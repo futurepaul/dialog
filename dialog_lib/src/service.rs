@@ -23,7 +23,7 @@ pub trait MlsService: Send + Sync + std::fmt::Debug {
     async fn get_relay_url(&self) -> Result<String>;
     
     // New methods for group lifecycle
-    async fn publish_key_packages(&self) -> Result<()>;
+    async fn publish_key_packages(&self) -> Result<Vec<String>>; // Returns event IDs
     async fn list_pending_invites(&self) -> Result<InviteListResult>;
     async fn accept_invite(&self, group_id: &str) -> Result<()>;
     async fn fetch_and_process_group_events(&self, group_id: &GroupId) -> Result<()>;

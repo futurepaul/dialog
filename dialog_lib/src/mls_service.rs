@@ -555,7 +555,7 @@ impl MlsService for RealMlsService {
         Ok(self.relay_url.clone())
     }
 
-    async fn publish_key_packages(&self) -> Result<()> {
+    async fn publish_key_packages(&self) -> Result<Vec<String>> {
         let client = self.client.read().await;
         let nostr_mls = self.nostr_mls.read().await;
 
@@ -565,26 +565,43 @@ impl MlsService for RealMlsService {
             return Err(DialogError::General("Not connected to relay".into()));
         }
 
-        // Create a key package for the event
-        let relay_url = RelayUrl::parse(&self.relay_url)
-            .map_err(|e| DialogError::General(format!("Invalid relay URL: {}", e).into()))?;
-        let relay_urls = vec![relay_url];
-        let (key_package_encoded, tags) = nostr_mls
-            .create_key_package_for_event(&self.keys.public_key(), relay_urls)?;
+        // EPHEMERAL MODE: We publish fresh key packages on every startup
+        // because we use memory storage and lose HPKE private keys on restart.
+        // This means:
+        // - Old key packages on relay become "orphaned" (we can't decrypt welcomes to them)
+        // - We should ideally delete old packages, but Nostr doesn't guarantee deletion
+        // - For now, we just publish fresh ones and document the event IDs for observability
+        
+        let mut event_ids = Vec::new();
+        
+        // Create multiple key packages (typically 10-20 for redundancy)
+        // MLS best practice: publish multiple to avoid race conditions
+        let num_packages = 5; // Reduced for testing, increase for production
+        
+        for _ in 0..num_packages {
+            // Create a key package for the event
+            let relay_url = RelayUrl::parse(&self.relay_url)
+                .map_err(|e| DialogError::General(format!("Invalid relay URL: {}", e).into()))?;
+            let relay_urls = vec![relay_url];
+            let (key_package_encoded, tags) = nostr_mls
+                .create_key_package_for_event(&self.keys.public_key(), relay_urls)?;
 
-        // Build the key package event
-        let key_package_event = EventBuilder::new(Kind::MlsKeyPackage, key_package_encoded)
-            .tags(tags)
-            .sign_with_keys(&self.keys)
-            .map_err(|e| DialogError::General(format!("Failed to sign key package: {}", e).into()))?;
+            // Build the key package event
+            let key_package_event = EventBuilder::new(Kind::MlsKeyPackage, key_package_encoded)
+                .tags(tags)
+                .sign_with_keys(&self.keys)
+                .map_err(|e| DialogError::General(format!("Failed to sign key package: {}", e).into()))?;
 
-        // Publish the key package event
-        client
-            .send_event(&key_package_event)
-            .await
-            .map_err(|e| DialogError::General(format!("Failed to publish key package: {}", e).into()))?;
+            // Publish the key package event
+            let event_id = client
+                .send_event(&key_package_event)
+                .await
+                .map_err(|e| DialogError::General(format!("Failed to publish key package: {}", e).into()))?;
+            
+            event_ids.push(event_id.to_hex());
+        }
 
-        Ok(())
+        Ok(event_ids)
     }
 
     async fn list_pending_invites(&self) -> Result<InviteListResult> {

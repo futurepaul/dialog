@@ -548,18 +548,39 @@ impl App {
                         self.selection_mode = SelectionMode::None;
                         
                         self.add_message(&format!("Creating group '{}' with {} participant(s)...", group_name, selected_contacts.len()));
+                        
+                        // Show which participants we're inviting (for observability)
+                        self.add_message("📋 Fetching key packages for:");
+                        for pubkey in &selected_contacts {
+                            let name = self.contacts.iter()
+                                .find(|c| c.pubkey == *pubkey)
+                                .map(|c| c.name.as_str())
+                                .unwrap_or("Unknown");
+                            self.add_message(&format!("    - {} ({}...{})", 
+                                name,
+                                &pubkey.to_hex()[0..8],
+                                &pubkey.to_hex()[pubkey.to_hex().len()-8..]
+                            ));
+                        }
+                        
                         match self.dialog_lib.create_conversation(&group_name, selected_contacts).await {
                             Ok(group_id) => {
                                 self.add_message(&format!("✅ Group '{}' created successfully!", group_name));
                                 self.add_message(&format!("Group ID: {}", group_id));
-                                self.add_message("Invitations have been sent to all participants.");
+                                self.add_message("✅ Welcome messages sent to all participants");
+                                self.add_message("");
+                                self.add_message("⚠️  EPHEMERAL MODE: Participants must accept invites during THIS session");
+                                self.add_message("    (Their key packages are only valid until they restart)");
                                 self.refresh_data().await;
                             }
                             Err(e) => {
                                 self.add_message(&format!("❌ Error creating group: {}", e));
                                 if e.to_string().contains("key package") {
-                                    self.add_message("Make sure all participants have published their key packages.");
-                                    self.add_message("They can use /keypackage command to publish.");
+                                    self.add_message("");
+                                    self.add_message("⚠️  EPHEMERAL MODE: This likely means:");
+                                    self.add_message("    - Participant is offline (hasn't published packages this session)");
+                                    self.add_message("    - They restarted and old packages are orphaned");
+                                    self.add_message("    - They need to run /keypackage to publish fresh ones");
                                 }
                             }
                         }
@@ -689,6 +710,11 @@ impl App {
                         state,
                     };
                     self.add_message("Select contacts for the group. Use arrow keys to navigate, Space to toggle, Enter to create, Esc to cancel.");
+                    self.add_message("");
+                    self.add_message("⚠️  EPHEMERAL MODE WARNING:");
+                    self.add_message("    Make sure selected contacts are ONLINE NOW");
+                    self.add_message("    They must have published key packages THIS SESSION");
+                    self.add_message("    (Invites to old/offline key packages will fail)");
                 } else {
                     self.add_message("Usage: /create <group_name>");
                     self.add_message("Example: /create Coffee Chat");
@@ -806,14 +832,26 @@ impl App {
                     return;
                 }
                 
-                self.add_message("Publishing key package to relay...");
+                self.add_message("Publishing key packages to relay...");
                 match self.dialog_lib.publish_key_packages().await {
-                    Ok(()) => {
-                        self.add_message("✅ Key package published successfully!");
-                        self.add_message("Other users can now invite you to groups.");
+                    Ok(event_ids) => {
+                        self.add_message(&format!("✅ Published {} key packages successfully!", event_ids.len()));
+                        
+                        // Show event IDs for observability
+                        self.add_message("📋 Key package event IDs:");
+                        for (i, event_id) in event_ids.iter().enumerate() {
+                            self.add_message(&format!("    {}: {}...{}", 
+                                i + 1, 
+                                &event_id[0..8], 
+                                &event_id[event_id.len()-8..]
+                            ));
+                        }
+                        
+                        self.add_message("");
+                        self.add_message("Other users can now invite you to groups using these packages.");
                     }
                     Err(e) => {
-                        self.add_message(&format!("❌ Error publishing key package: {}", e));
+                        self.add_message(&format!("❌ Error publishing key packages: {}", e));
                     }
                 }
             }
@@ -831,8 +869,20 @@ impl App {
                 // For now, we'll use the same publish_key_packages method
                 // In the future, this could delete old packages first
                 match self.dialog_lib.publish_key_packages().await {
-                    Ok(()) => {
-                        self.add_message("✅ Fresh key packages published successfully!");
+                    Ok(event_ids) => {
+                        self.add_message(&format!("✅ Published {} fresh key packages!", event_ids.len()));
+                        
+                        // Show event IDs for observability
+                        self.add_message("📋 Fresh key package event IDs:");
+                        for (i, event_id) in event_ids.iter().enumerate() {
+                            self.add_message(&format!("    {}: {}...{}", 
+                                i + 1, 
+                                &event_id[0..8], 
+                                &event_id[event_id.len()-8..]
+                            ));
+                        }
+                        
+                        self.add_message("");
                         self.add_message("💡 Tip: Groups created with old key packages may still fail.");
                         self.add_message("    Consider asking contacts to use your latest packages.");
                     }
@@ -862,6 +912,14 @@ impl App {
                 self.refresh_data().await;
                 self.add_message("Current setup:");
                 self.add_message("");
+                
+                // Add ephemeral mode warning
+                self.add_message("🔐 EPHEMERAL MODE ACTIVE");
+                self.add_message("  Storage: Memory (NostrMlsMemoryStorage)");
+                self.add_message("  HPKE Keys: Lost on restart");
+                self.add_message("  Key Packages: Fresh ones published each session");
+                self.add_message("");
+                
                 self.add_message(&format!("  Working directory: {}", std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| "unknown".to_string())));
                 
                 // Add relay URL

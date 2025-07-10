@@ -160,7 +160,8 @@ impl DialogLib {
     }
 
     /// Publish key packages to the relay
-    pub async fn publish_key_packages(&self) -> Result<()> {
+    /// Returns the event IDs of the published key packages for observability
+    pub async fn publish_key_packages(&self) -> Result<Vec<String>> {
         self.service.publish_key_packages().await
     }
 
