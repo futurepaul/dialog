@@ -11,6 +11,32 @@ Currently, if Alice doesn't publish a new key package and Bob tries to create a 
 - Alice won't receive the invitation even if creation succeeds
 - There's no automatic recovery mechanism
 
+### Root Cause with Memory Storage
+
+The fundamental issue is that Dialog uses `NostrMlsMemoryStorage`, which means:
+- Private keys for key packages are lost on restart
+- Published key packages remain on the relay indefinitely
+- Alice can't decrypt welcome messages encrypted to her old packages
+- There's no way to detect or clean up these "orphaned" packages
+
+### Key Types Clarification
+
+There are two types of keys involved:
+
+1. **Nostr Identity Keys (from nsec)**
+   - Persistent and deterministic (derived from nsec)
+   - Used for signing Nostr events
+   - Used for decrypting gift-wrapped messages
+   - NOT lost on restart
+
+2. **MLS HPKE Keys (in key packages)**
+   - Randomly generated for each key package
+   - Used for MLS encryption protocol
+   - Used to decrypt welcome messages when joining groups
+   - **LOST on restart with memory storage**
+   
+The confusion arises because while Alice keeps her Nostr identity (nsec), she loses the HPKE private keys that are essential for joining groups. These HPKE keys are randomly generated each time a key package is created and cannot be reconstructed from the nsec.
+
 ## Whitenoise's Approach
 
 ### Key Findings
@@ -163,9 +189,66 @@ struct KeyPackageMetadata {
 - **Pros**: Balanced approach
 - **Cons**: More complex implementation
 
+## Key Package Consistency Solution
+
+### The Insight
+
+When Alice starts up, she could:
+1. Query the relay for all her published key packages
+2. Check which ones she has private keys for
+3. Delete/replace orphaned packages she can't decrypt
+
+### Implementation Approach
+
+```rust
+async fn sync_key_packages_on_startup(&mut self) -> Result<()> {
+    // 1. Fetch all our key packages from relay
+    let published_packages = self.fetch_own_key_packages().await?;
+    
+    // 2. Check which ones we have private keys for
+    let mut orphaned = Vec::new();
+    let mut valid = Vec::new();
+    
+    for package in published_packages {
+        if self.has_private_key_for(&package)? {
+            valid.push(package);
+        } else {
+            orphaned.push(package);
+        }
+    }
+    
+    // 3. Clean up orphaned packages
+    if !orphaned.is_empty() {
+        println!("Found {} orphaned key packages, cleaning up...", orphaned.len());
+        self.delete_key_packages(orphaned).await?;
+    }
+    
+    // 4. Ensure we have fresh packages available
+    if valid.len() < MIN_KEY_PACKAGES {
+        println!("Publishing fresh key packages...");
+        self.publish_key_packages().await?;
+    }
+    
+    Ok(())
+}
+```
+
+### Benefits
+
+1. **Consistency**: Ensures relay state matches local state
+2. **Reliability**: Old invites won't fail due to missing private keys
+3. **Cleanliness**: Removes unusable key packages from relay
+4. **Fresh Start**: Each session starts with known-good packages
+
+### Challenges
+
+1. **Can't Recover Private Keys**: Once lost (due to memory storage), private keys can't be reconstructed from public packages
+2. **Race Conditions**: Multiple clients might try to clean up simultaneously
+3. **In-Flight Invites**: Deleting packages might invalidate invites that are in transit
+
 ## Immediate Steps for Dialog
 
-1. **Add Autoconnect on Startup**
+1. **Add Autoconnect on Startup** ✅ (Implemented)
    ```rust
    // In dialog_tui main.rs after creating App
    if let Err(e) = app.dialog_lib.toggle_connection().await {
@@ -175,7 +258,7 @@ struct KeyPackageMetadata {
    }
    ```
 
-2. **Add Key Package Refresh Command**
+2. **Add Key Package Refresh Command** ✅ (Implemented)
    ```rust
    "/refresh-keys" => {
        self.add_message("Refreshing key packages...");
@@ -190,10 +273,16 @@ struct KeyPackageMetadata {
    }
    ```
 
-3. **Track Key Package Age** (Minimal)
-   - Store publish timestamp in config/state file
-   - Check age on startup
-   - Warn if packages are stale
+3. **Add Key Package Sync on Startup** (Proposed)
+   - Query relay for our own key packages
+   - Check consistency with local private keys
+   - Clean up orphaned packages
+   - Publish fresh packages if needed
+
+4. **Track Key Package State** (Future)
+   - Store key package metadata persistently
+   - Track which packages are in use
+   - Implement proper lifecycle management
 
 ## Security Considerations
 
@@ -209,16 +298,40 @@ struct KeyPackageMetadata {
    - Malicious clients could flood with packages
    - Rate limiting on relay side recommended
 
+## Solution Paths
+
+### Option 1: Clean Slate on Startup (Current Workaround)
+- Delete all old key packages on startup
+- Publish fresh packages immediately
+- Simple but may invalidate in-flight invites
+
+### Option 2: Persistent Storage (Whitenoise Approach)
+- Switch to SQLite or file-based storage
+- Preserve HPKE private keys across restarts
+- More complex but maintains continuity
+
+### Option 3: Deterministic Key Derivation (Non-standard)
+- Derive HPKE keys from nsec + counter
+- Could reconstruct keys on restart
+- Breaks MLS security assumptions about forward secrecy
+
+### Option 4: Key Package Sync and Cleanup (Proposed)
+- Query relay for existing packages on startup
+- Delete packages we can't decrypt
+- Publish fresh packages to replace them
+- Maintains standard MLS security while handling memory storage limitations
+
 ## Conclusion
 
 Dialog should implement at minimum:
-1. Autoconnect on startup
-2. Manual key package refresh command
-3. Age tracking for key packages
+1. Autoconnect on startup ✅
+2. Manual key package refresh command ✅
+3. Key package sync/cleanup on startup (proposed)
 
 For production, implement full lifecycle management with:
+- Switch to persistent storage
 - Automatic refresh based on age/usage
 - Proper last resort package handling
 - Revocation of old packages
 
-This ensures users don't miss invitations due to stale key packages while maintaining security best practices from the MLS specification.
+The key insight is that MLS HPKE keys are randomly generated and cannot be reconstructed from the Nostr identity. This makes persistent storage or aggressive cleanup essential for reliable group messaging.
